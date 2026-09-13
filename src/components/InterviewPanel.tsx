@@ -1,12 +1,11 @@
 import { useState } from "react";
-import { CheckCircle2, Clock, SkipForward, CheckCircle, Network, List } from "lucide-react";
+import { CheckCircle2, Clock, SkipForward, CheckCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { useSessionStore } from "@/store/sessionStore";
 import { InlineQuestionCard } from "./InlineQuestionCard";
 import { OutlinePanel } from "./OutlinePanel";
-import { QuestionGraph } from "./QuestionGraph";
 import { api } from "@/lib/tauri";
 import { toast } from "sonner";
 
@@ -18,7 +17,6 @@ interface InterviewPanelProps {
 export function InterviewPanel({ mayComplete }: InterviewPanelProps) {
   const { questions, currentSessionId } = useSessionStore();
   const [finishing, setFinishing] = useState(false);
-  const [view, setView] = useState<"list" | "graph">("list");
 
   const pending = questions.filter((q) => q.status === "ready" || q.status === "stale");
   const answered = questions.filter((q) => q.status === "answered");
@@ -58,31 +56,11 @@ export function InterviewPanel({ mayComplete }: InterviewPanelProps) {
             </Badge>
           )}
         </div>
-        <div className="flex items-center gap-1.5">
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-7 px-2"
-            title={view === "list" ? "查看问题依赖关系图" : "返回列表"}
-            onClick={() => setView(view === "list" ? "graph" : "list")}
-          >
-            {view === "list" ? (
-              <Network className="h-3.5 w-3.5" />
-            ) : (
-              <List className="h-3.5 w-3.5" />
-            )}
-          </Button>
-          <Button onClick={handleFinish} disabled={finishing} size="sm">
-            {finishing ? "处理中..." : "完成访谈"}
-          </Button>
-        </div>
+        <Button onClick={handleFinish} disabled={finishing} size="sm">
+          {finishing ? "处理中..." : "完成访谈"}
+        </Button>
       </div>
 
-      {view === "graph" ? (
-        <div className="min-h-0 flex-1">
-          <QuestionGraph />
-        </div>
-      ) : (
       <ScrollArea className="flex-1">
         <div className="mx-auto max-w-2xl space-y-4 p-4">
           <OutlinePanel />
@@ -119,7 +97,6 @@ export function InterviewPanel({ mayComplete }: InterviewPanelProps) {
           )}
         </div>
       </ScrollArea>
-      )}
     </div>
   );
 }

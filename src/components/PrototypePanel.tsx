@@ -15,6 +15,7 @@ import {
   Play,
   Workflow,
   GitBranch,
+  Network,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -28,9 +29,10 @@ import { cn } from "@/lib/utils";
 import type { PrototypeFile } from "@/lib/types";
 import { IterationCanvas } from "@/components/IterationCanvas";
 import { TimelineGraph } from "@/components/TimelineGraph";
+import { QuestionGraph } from "@/components/QuestionGraph";
 
 type DeviceId = "desktop" | "tablet" | "mobile";
-type PanelTab = "preview" | "blueprint" | "timeline";
+type PanelTab = "preview" | "blueprint" | "timeline" | "qgraph";
 
 const DEVICES: {
   id: DeviceId;
@@ -188,6 +190,7 @@ export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
                 { id: "preview" as const, label: "预览", icon: Monitor },
                 { id: "blueprint" as const, label: "蓝图", icon: Workflow },
                 { id: "timeline" as const, label: "时间线", icon: GitBranch },
+                { id: "qgraph" as const, label: "问题图", icon: Network },
               ]
             ).map((t) => {
               const Icon = t.icon;
@@ -314,6 +317,10 @@ export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
               setTab("preview");
             }}
           />
+        </div>
+      ) : tab === "qgraph" ? (
+        <div className="min-h-0 flex-1">
+          <QuestionGraph />
         </div>
       ) : (
         <>

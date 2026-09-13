@@ -47,7 +47,7 @@ function QuestionNode({ data, selected }: NodeProps<Node<QNodeData>>) {
       )}
       style={{ borderLeft: `3px solid ${st.color}` }}
     >
-      <Handle type="target" position={Position.Top} className="!h-1.5 !w-1.5" />
+      <Handle type="target" position={Position.Left} className="!h-1.5 !w-1.5" />
       <div className="p-2">
         <div className="flex items-center gap-1" style={{ color: st.color }}>
           {st.icon}
@@ -71,7 +71,7 @@ function QuestionNode({ data, selected }: NodeProps<Node<QNodeData>>) {
           <p className="mt-1 text-[10px] text-amber-600">已过期 · 依赖答案变化</p>
         )}
       </div>
-      <Handle type="source" position={Position.Bottom} className="!h-1.5 !w-1.5" />
+      <Handle type="source" position={Position.Right} className="!h-1.5 !w-1.5" />
     </div>
   );
 }
@@ -120,13 +120,13 @@ export function QuestionGraph() {
 
     const nodes: Node<QNodeData>[] = [];
     layers.forEach((qs, layer) => {
-      const w = 250;
-      const total = qs.length * w;
+      const h = 160;
+      const total = qs.length * h;
       qs.forEach((q, i) => {
         nodes.push({
           id: q.id,
           type: "qnode",
-          position: { x: i * w - total / 2, y: layer * 190 },
+          position: { x: layer * 300, y: i * h - total / 2 },
           data: {
             question: q,
             nodeTitle: q.outline_node_id ? nodeTitles.get(q.outline_node_id) : undefined,
