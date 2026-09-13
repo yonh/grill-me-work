@@ -1542,6 +1542,10 @@ async fn handle_generate_prototype(
     let auto_approve = settings.agent_auto_approve;
     let sid = session_id.to_string();
     let app_for_lines = app_handle.clone();
+    let sid_for_log = sid.clone();
+
+    crate::agent::clear_agent_log(&sid);
+    let cancel_flag = crate::agent::new_cancel_flag(&sid);
 
     let run_result = tauri::async_runtime::spawn_blocking(move || {
         crate::agent::run_agent_to_completion(
@@ -1551,7 +1555,9 @@ async fn handle_generate_prototype(
             &workdir_str,
             auto_approve,
             &effort,
+            Some(cancel_flag),
             move |stream, text| {
+                crate::agent::push_agent_log(&sid_for_log, stream, text);
                 let _ = app_for_lines.emit(
                     EVENT_AGENT_OUTPUT,
                     AgentOutputPayload {
@@ -1566,25 +1572,41 @@ async fn handle_generate_prototype(
     .await
     .map_err(|e| format!("agent join: {e}"))?;
 
-    let code = run_result.map_err(|e| {
-        let _ = app_handle.emit(
-            EVENT_PROTOTYPE_STATUS,
-            PrototypeStatusPayload {
-                session_id: session_id.to_string(),
-                status: "failed".to_string(),
-                message: Some(e.clone()),
-            },
-        );
-        let _ = app_handle.emit(
-            EVENT_ERROR,
-            ErrorPayload {
-                session_id: session_id.to_string(),
-                message: format!("原型 agent 失败: {}", e),
-                kind: "prototype".to_string(),
-            },
-        );
-        e
-    })?;
+    crate::agent::clear_cancel_flag(session_id);
+
+    let code = match run_result {
+        Ok(c) => c,
+        Err(e) if e == crate::agent::ERR_CANCELLED => {
+            let _ = app_handle.emit(
+                EVENT_PROTOTYPE_STATUS,
+                PrototypeStatusPayload {
+                    session_id: session_id.to_string(),
+                    status: "cancelled".to_string(),
+                    message: Some("已取消".to_string()),
+                },
+            );
+            return Err("已取消".to_string());
+        }
+        Err(e) => {
+            let _ = app_handle.emit(
+                EVENT_PROTOTYPE_STATUS,
+                PrototypeStatusPayload {
+                    session_id: session_id.to_string(),
+                    status: "failed".to_string(),
+                    message: Some(e.clone()),
+                },
+            );
+            let _ = app_handle.emit(
+                EVENT_ERROR,
+                ErrorPayload {
+                    session_id: session_id.to_string(),
+                    message: format!("原型 agent 失败: {}", e),
+                    kind: "prototype".to_string(),
+                },
+            );
+            return Err(e);
+        }
+    };
 
     if code != 0 {
         let msg = format!("agent 退出码 {code}");
@@ -1623,9 +1645,10 @@ async fn handle_generate_prototype(
     let new_version = session.prototype_version + 1;
     let final_snapshot = crate::prototype::read_snapshot(session_id);
     let snapshot_json = serde_json::to_string(&final_snapshot).map_err(|e| e.to_string())?;
+    let subject_reason = build_commit_reason(feedback, trigger_note, new_version);
     let changelog = format!(
-        "agent {} 更新（{} 个文件）",
-        settings.agent_tool,
+        "{}（{} 个文件）",
+        subject_reason,
         final_snapshot.files.len()
     );
 
@@ -1658,7 +1681,6 @@ async fn handle_generate_prototype(
     // Record one git commit per successful generation (decision-tree node).
     // Subject: why this version exists; body: full trigger + instruction + file scope.
     let commit = {
-        let subject_reason = build_commit_reason(feedback, trigger_note, new_version);
         let mut body = String::new();
         if let Some(note) = trigger_note {
             if !note.trim().is_empty() {

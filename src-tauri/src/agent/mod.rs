@@ -266,7 +266,84 @@ fn sanitize_agent_line(raw: &str) -> String {
     out.trim().to_string()
 }
 
+// ==================== run cancellation + log buffer ====================
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Error string returned by [`run_agent_to_completion`] when cancelled.
+pub const ERR_CANCELLED: &str = "__cancelled__";
+
+fn cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    static C: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a fresh cancel flag for a run about to start (one per session).
+pub fn new_cancel_flag(session_id: &str) -> Arc<AtomicBool> {
+    let f = Arc::new(AtomicBool::new(false));
+    cancel_flags()
+        .lock()
+        .unwrap()
+        .insert(session_id.to_string(), f.clone());
+    f
+}
+
+/// Signal the running agent for `session_id` to stop. false if nothing running.
+pub fn request_cancel(session_id: &str) -> bool {
+    if let Some(f) = cancel_flags().lock().unwrap().get(session_id) {
+        f.store(true, Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+/// Drop the flag once a run finishes (success/fail/cancel alike).
+pub fn clear_cancel_flag(session_id: &str) {
+    cancel_flags().lock().unwrap().remove(session_id);
+}
+
+const AGENT_LOG_CAP: usize = 400;
+
+/// Ring buffer of recent agent output lines per session (for log polling).
+fn agent_logs() -> &'static Mutex<HashMap<String, VecDeque<String>>> {
+    static C: OnceLock<Mutex<HashMap<String, VecDeque<String>>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn push_agent_log(session_id: &str, stream: &str, text: &str) {
+    let mut g = agent_logs().lock().unwrap();
+    let buf = g.entry(session_id.to_string()).or_default();
+    buf.push_back(format!("[{stream}] {text}"));
+    while buf.len() > AGENT_LOG_CAP {
+        buf.pop_front();
+    }
+}
+
+pub fn clear_agent_log(session_id: &str) {
+    agent_logs().lock().unwrap().remove(session_id);
+}
+
+/// Recent agent output lines; `tail` limits to the last N.
+pub fn get_agent_log(session_id: &str, tail: Option<usize>) -> Vec<String> {
+    let g = agent_logs().lock().unwrap();
+    let buf = match g.get(session_id) {
+        Some(b) => b,
+        None => return vec![],
+    };
+    match tail {
+        Some(n) => buf
+            .iter()
+            .skip(buf.len().saturating_sub(n))
+            .cloned()
+            .collect(),
+        None => buf.iter().cloned().collect(),
+    }
+}
+
 /// Run agent to completion, invoking `on_line(stream, text)` for each output line.
+/// `cancel`: when the flag flips true the child is killed and Err(ERR_CANCELLED) returned.
 /// Returns Ok(exit_code) or Err(message).
 pub fn run_agent_to_completion(
     tool: &str,
@@ -275,6 +352,7 @@ pub fn run_agent_to_completion(
     workdir: &str,
     auto_approve: bool,
     effort: &str,
+    cancel: Option<Arc<AtomicBool>>,
     mut on_line: impl FnMut(&str, &str) + Send,
 ) -> Result<i32, String> {
     use std::io::BufRead;
@@ -311,6 +389,15 @@ pub fn run_agent_to_completion(
     let status = loop {
         while let Ok((stream, text)) = rx.try_recv() {
             on_line(&stream, &text);
+        }
+        if cancel
+            .as_ref()
+            .map(|f| f.load(Ordering::Relaxed))
+            .unwrap_or(false)
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ERR_CANCELLED.into());
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,

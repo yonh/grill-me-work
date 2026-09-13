@@ -71,6 +71,8 @@ pub fn tool_names() -> Vec<&'static str> {
         "fork_branch",
         "run_graph",
         "cancel_graph",
+        "cancel_prototype",
+        "get_agent_log",
     ]
 }
 
@@ -312,6 +314,24 @@ pub fn tool_definitions() -> Vec<Value> {
             "description": "取消正在运行的迭代蓝图。",
             "inputSchema": session_id_schema(),
         }),
+        json!({
+            "name": "cancel_prototype",
+            "description": "中止该会话当前正在跑的原型 agent 进程（kill 子进程）。返回 was_running 表示当时是否真有任务在跑。",
+            "inputSchema": session_id_schema(),
+        }),
+        json!({
+            "name": "get_agent_log",
+            "description": "读取该会话最近一次原型 agent 运行的输出日志（环形缓冲，最多 400 行）。tail 可选，只取最后 N 行。",
+            "inputSchema": json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "tail": { "type": "integer", "description": "只返回最后 N 行" }
+                },
+                "required": ["session_id"],
+                "additionalProperties": false
+            }),
+        }),
     ]
 }
 
@@ -344,6 +364,8 @@ pub fn call_tool(ctx: &McpContext, name: &str, args: &Value) -> Result<Value, St
         "fork_branch" => fork_branch(ctx, args),
         "run_graph" => run_graph(ctx, args),
         "cancel_graph" => cancel_graph(ctx, args),
+        "cancel_prototype" => cancel_prototype(ctx, args),
+        "get_agent_log" => get_agent_log(ctx, args),
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -899,4 +921,22 @@ fn cancel_graph(ctx: &McpContext, args: &Value) -> Result<Value, String> {
         reply,
     })?;
     Ok(json!({ "ok": true }))
+}
+
+fn cancel_prototype(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let _ = ctx;
+    let id = session_id(args)?;
+    let was_running = crate::agent::request_cancel(&id);
+    Ok(json!({ "ok": true, "was_running": was_running }))
+}
+
+fn get_agent_log(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let _ = ctx;
+    let id = session_id(args)?;
+    let tail = args
+        .get("tail")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let lines = crate::agent::get_agent_log(&id, tail);
+    Ok(json!({ "count": lines.len(), "lines": lines }))
 }
