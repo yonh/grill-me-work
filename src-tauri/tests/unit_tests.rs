@@ -580,6 +580,29 @@ mod tests {
                 decisions: vec![],
             })
         }
+
+        fn append_activity(
+            &self,
+            _session_id: &str,
+            _kind: &str,
+            _label: &str,
+            _detail: Option<&str>,
+            _level: &str,
+        ) -> Result<Activity> {
+            Ok(Activity {
+                id: 0,
+                session_id: _session_id.to_string(),
+                kind: _kind.to_string(),
+                label: _label.to_string(),
+                detail: _detail.map(|d| d.to_string()),
+                level: _level.to_string(),
+                created_at: "now".to_string(),
+            })
+        }
+
+        fn list_activity(&self, _session_id: &str, _limit: i64) -> Result<Vec<Activity>> {
+            Ok(vec![])
+        }
     }
 
     // ============ Stale marking / dependency graph tests ============

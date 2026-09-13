@@ -109,6 +109,28 @@ export interface RoundArchive {
   decisions: DecisionEntry[];
 }
 
+// --- Activity feed (操作动态) ---
+
+export type ActivityKind =
+  | "mcp"
+  | "pipeline"
+  | "round"
+  | "interview"
+  | "agent"
+  | "llm";
+
+export type ActivityLevel = "info" | "ok" | "warn" | "err";
+
+export interface Activity {
+  id: number;
+  session_id: string;
+  kind: ActivityKind | string;
+  label: string;
+  detail?: string | null;
+  level: ActivityLevel | string;
+  created_at: string;
+}
+
 export interface Session {
   id: string;
   title: string;

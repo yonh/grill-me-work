@@ -150,7 +150,10 @@ fn dispatch(ctx: &McpContext, msg: &serde_json::Value) -> serde_json::Value {
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
-            match tools::call_tool(ctx, name, &args) {
+            let started = std::time::Instant::now();
+            let outcome = tools::call_tool(ctx, name, &args);
+            record_mcp_activity(ctx, name, &args, started.elapsed(), &outcome);
+            match outcome {
                 Ok(result) => protocol::tool_call_result(id, result),
                 Err(e) => protocol::error_response(id, -32000, &e),
             }
@@ -158,6 +161,90 @@ fn dispatch(ctx: &McpContext, msg: &serde_json::Value) -> serde_json::Value {
         "" => protocol::error_response(id, -32600, "invalid request"),
         other => protocol::error_response(id, -32601, &format!("method not found: {other}")),
     }
+}
+
+/// Read-only/polling tools — skipped in the activity feed so the timeline
+/// shows only operations that change state.
+const QUIET_TOOLS: &[&str] = &[
+    "list_sessions", "get_active_session", "get_session_state", "get_outline",
+    "list_questions", "get_messages", "get_prototype_versions", "get_timeline",
+    "get_agent_log", "get_app_log", "get_pipeline", "list_rounds",
+    "get_round_archive", "get_activity",
+];
+
+/// Persist one activity row per mutating MCP call so the user can see exactly
+/// what an external agent triggered. Detail = compact args + duration + result.
+fn record_mcp_activity(
+    ctx: &McpContext,
+    name: &str,
+    args: &serde_json::Value,
+    elapsed: std::time::Duration,
+    outcome: &Result<serde_json::Value, String>,
+) {
+    if QUIET_TOOLS.contains(&name) {
+        return;
+    }
+    let session_id = args
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            // For tools like create_session the id is in the result.
+            outcome
+                .as_ref()
+                .ok()
+                .and_then(|v| v.get("session_id").and_then(|s| s.as_str()))
+                .map(|s| s.to_string())
+        })
+        .or_else(|| {
+            outcome
+                .as_ref()
+                .ok()
+                .and_then(|v| {
+                    v.get("session")
+                        .and_then(|s| s.get("id"))
+                        .and_then(|s| s.as_str())
+                })
+                .map(|s| s.to_string())
+        });
+    let Some(sid) = session_id else { return };
+
+    // Compact args: keep meaningful fields, drop the session id and long blobs.
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(obj) = args.as_object() {
+        for (k, v) in obj {
+            if k == "session_id" {
+                continue;
+            }
+            let vs = match v {
+                serde_json::Value::String(s) => {
+                    let t: String = s.chars().take(50).collect();
+                    format!("{k}={t}")
+                }
+                serde_json::Value::Null => continue,
+                other => format!("{k}={}", other.to_string().chars().take(50).collect::<String>()),
+            };
+            parts.push(vs);
+        }
+    }
+    let ms = elapsed.as_millis();
+    let (level, tail) = match outcome {
+        Ok(_) => ("ok", String::new()),
+        Err(e) => {
+            let e: String = e.chars().take(80).collect();
+            ("err", format!(" · {e}"))
+        }
+    };
+    let detail = format!("{} · {}ms{}", parts.join(" "), ms, tail);
+    crate::scheduler::record_activity(
+        ctx.store.as_ref(),
+        ctx.app.as_ref(),
+        &sid,
+        "mcp",
+        &format!("MCP: {name}"),
+        Some(&detail),
+        level,
+    );
 }
 
 #[cfg(test)]

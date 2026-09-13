@@ -89,4 +89,17 @@ pub trait Store: Send + Sync + 'static {
     fn set_current_round(&self, session_id: &str, round_id: Option<&str>) -> Result<()>;
     /// Aggregate read of one specific round (history/archive view).
     fn get_round_archive(&self, round_id: &str) -> Result<RoundArchive>;
+
+    // Activity feed (操作动态)
+    /// Append one activity entry; returns its row id.
+    fn append_activity(
+        &self,
+        session_id: &str,
+        kind: &str,
+        label: &str,
+        detail: Option<&str>,
+        level: &str,
+    ) -> Result<Activity>;
+    /// Latest-first activity feed for a session.
+    fn list_activity(&self, session_id: &str, limit: i64) -> Result<Vec<Activity>>;
 }

@@ -20,6 +20,7 @@ import type {
   Ticket,
   Round,
   RoundArchive,
+  Activity,
 } from "./types";
 
 export const api = {
@@ -141,6 +142,8 @@ export const api = {
   listRounds: (sessionId: string) => invoke<Round[]>("list_rounds", { sessionId }),
   getRoundArchive: (roundId: string) =>
     invoke<RoundArchive>("get_round_archive", { roundId }),
+  listActivity: (sessionId: string, limit?: number) =>
+    invoke<Activity[]>("list_activity", { sessionId, limit: limit ?? null }),
 };
 
 export function onNewQuestion(cb: (q: Question) => void): Promise<UnlistenFn> {
@@ -337,6 +340,10 @@ export function onRoundArchived(
   return listen<{ session_id: string; round: Round }>("round_archived", (e) =>
     cb(e.payload)
   );
+}
+
+export function onActivity(cb: (a: Activity) => void): Promise<UnlistenFn> {
+  return listen<Activity>("activity", (e) => cb(e.payload));
 }
 
 export function onSessionCreated(

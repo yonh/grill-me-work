@@ -1023,3 +1023,23 @@ pub async fn get_round_archive(
     rx.await
         .map_err(|_| "scheduler actor dropped reply".to_string())?
 }
+
+#[tauri::command]
+pub async fn list_activity(
+    session_id: String,
+    limit: Option<i64>,
+    state: State<'_, ActorHandle>,
+) -> Result<Vec<crate::model::Activity>, String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::ListActivity {
+            session_id,
+            limit: limit.unwrap_or(200),
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}

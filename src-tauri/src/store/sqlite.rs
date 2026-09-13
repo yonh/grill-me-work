@@ -304,6 +304,17 @@ impl SqliteStore {
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );
             CREATE INDEX IF NOT EXISTS idx_rounds_session ON rounds(session_id);
+
+            CREATE TABLE IF NOT EXISTS activities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                label TEXT NOT NULL,
+                detail TEXT,
+                level TEXT NOT NULL DEFAULT 'info',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_activities_session ON activities(session_id, id DESC);
             "#,
         )?;
 
@@ -1397,5 +1408,49 @@ impl Store for SqliteStore {
             messages,
             decisions,
         })
+    }
+
+    fn append_activity(
+        &self,
+        session_id: &str,
+        kind: &str,
+        label: &str,
+        detail: Option<&str>,
+        level: &str,
+    ) -> Result<Activity> {
+        let conn = self.conn.lock().unwrap();
+        let created_at = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO activities (session_id, kind, label, detail, level, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![session_id, kind, label, detail, level, created_at],
+        )?;
+        Ok(Activity {
+            id: conn.last_insert_rowid(),
+            session_id: session_id.to_string(),
+            kind: kind.to_string(),
+            label: label.to_string(),
+            detail: detail.map(|s| s.to_string()),
+            level: level.to_string(),
+            created_at,
+        })
+    }
+
+    fn list_activity(&self, session_id: &str, limit: i64) -> Result<Vec<Activity>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, kind, label, detail, level, created_at FROM activities WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![session_id, limit], |row| {
+            Ok(Activity {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                kind: row.get(2)?,
+                label: row.get(3)?,
+                detail: row.get(4)?,
+                level: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }

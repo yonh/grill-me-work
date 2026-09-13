@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Session, Question, Settings, OutlineNode, OutlineStatus, PipelineStage, Ticket, Round } from "@/lib/types";
+import type { Session, Question, Settings, OutlineNode, OutlineStatus, PipelineStage, Ticket, Round, Activity } from "@/lib/types";
 
 interface SessionStore {
   sessions: Session[];
@@ -17,6 +17,7 @@ interface SessionStore {
   rounds: Round[];
   currentRound: Round | null;
   runningTickets: string[];
+  activities: Activity[];
 
   setSessions: (sessions: Session[]) => void;
   setCurrentSession: (id: string | null) => void;
@@ -39,6 +40,8 @@ interface SessionStore {
     running?: string[]
   ) => void;
   setRounds: (rounds: Round[], currentRoundId?: string | null) => void;
+  setActivities: (activities: Activity[]) => void;
+  addActivity: (a: Activity) => void;
   bumpSessionPrototypeVersion: (sessionId: string, version: number) => void;
 }
 
@@ -58,11 +61,12 @@ export const useSessionStore = create<SessionStore>((set) => ({
   rounds: [],
   currentRound: null,
   runningTickets: [],
+  activities: [],
 
   setSessions: (sessions) => set({ sessions }),
 
   setCurrentSession: (id) =>
-    set({ currentSessionId: id, questions: [], outlineStatus: "none", outlineNodes: [], pipelineStage: "none", spec: null, tickets: [], rounds: [], currentRound: null, runningTickets: [] }),
+    set({ currentSessionId: id, questions: [], outlineStatus: "none", outlineNodes: [], pipelineStage: "none", spec: null, tickets: [], rounds: [], currentRound: null, runningTickets: [], activities: [] }),
 
   addSession: (session) =>
     set((state) => ({ sessions: [session, ...state.sessions] })),
@@ -127,6 +131,15 @@ export const useSessionStore = create<SessionStore>((set) => ({
         null;
       return { rounds, currentRound: current ?? state.currentRound };
     }),
+
+  setActivities: (activities) => set({ activities }),
+
+  addActivity: (a) =>
+    set((state) =>
+      a.session_id !== state.currentSessionId
+        ? state
+        : { activities: [a, ...state.activities].slice(0, 300) }
+    ),
 
   bumpSessionPrototypeVersion: (sessionId, version) =>
     set((state) => ({

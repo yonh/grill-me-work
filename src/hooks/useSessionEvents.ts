@@ -11,6 +11,7 @@ import {
   onPipelineUpdated,
   onRoundStarted,
   onRoundArchived,
+  onActivity,
   onChatStream,
   onChatMessageDone,
   onPrototypeStatus,
@@ -203,6 +204,12 @@ export function useSessionEvents(
       });
       if (cancelled) { u9b(); return; }
       unsubs.push(u9b);
+
+      const u9c = await onActivity((a) => {
+        useSessionStore.getState().addActivity(a);
+      });
+      if (cancelled) { u9c(); return; }
+      unsubs.push(u9c);
 
       const u10 = await onPrototypeUpdated((payload) => {
         bumpSessionPrototypeVersion(payload.session_id, payload.version);

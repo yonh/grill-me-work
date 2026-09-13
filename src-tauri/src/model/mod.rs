@@ -513,3 +513,20 @@ pub struct ChatMessage {
     pub question_ids: Vec<String>,
     pub created_at: String,
 }
+
+/// One entry in the per-session activity feed — records meaningful lifecycle
+/// and AI-driven operations so the UI can show "what happened".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Activity {
+    pub id: i64,
+    pub session_id: String,
+    /// mcp | pipeline | round | interview | agent | llm
+    pub kind: String,
+    /// Short title, e.g. "run_ticket t2" / "Spec 已确认".
+    pub label: String,
+    /// Optional extra context (args/result summary), truncated.
+    pub detail: Option<String>,
+    /// info | ok | warn | err
+    pub level: String,
+    pub created_at: String,
+}

@@ -297,6 +297,12 @@ pub enum SchedulerMsg {
         round_id: String,
         reply: oneshot::Sender<Result<RoundArchive, String>>,
     },
+    /// Latest-first activity feed for a session.
+    ListActivity {
+        session_id: String,
+        limit: i64,
+        reply: oneshot::Sender<Result<Vec<crate::model::Activity>, String>>,
+    },
 }
 
 /// Per-session scheduler state.
@@ -773,6 +779,15 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                 if result.is_ok() {
                     state.get_or_create(&session_id).saturated = false;
                     emit_outline_updated(&*store, &session_id, &app_handle);
+                    record_activity(
+                        &*store,
+                        Some(&app_handle),
+                        &session_id,
+                        "interview",
+                        "访谈大纲已确认，开始按节点出题",
+                        None,
+                        "ok",
+                    );
                     // Kick off the first scoped batch
                     check_water_levels_and_trigger(
                         store.clone(),
@@ -1067,6 +1082,15 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                                     tx.clone(),
                                 );
                                 state.get_or_create(&session_id).tickets_generating = true;
+                                record_activity(
+                                    &*store,
+                                    Some(&app_handle),
+                                    &session_id,
+                                    "pipeline",
+                                    "Spec 已确认，写入 docs/spec.md，开始拆解 tickets",
+                                    None,
+                                    "ok",
+                                );
                                 Ok(())
                             }
                             _ => Err("spec 为空，无法确认".to_string()),
@@ -1151,14 +1175,24 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                             store
                                 .set_session_pipeline_stage(&session_id, PipelineStage::Developing)
                                 .map_err(|e| e.to_string())
+                                .map(|_| count)
                         }
                     }
                     _ => Err("当前不在 tickets_draft 阶段".to_string()),
                 };
-                if result.is_ok() {
+                if let Ok(n) = &result {
+                    record_activity(
+                        &*store,
+                        Some(&app_handle),
+                        &session_id,
+                        "pipeline",
+                        &format!("Tickets 已确认（{n} 条），进入分支地图开发"),
+                        None,
+                        "ok",
+                    );
                     emit_pipeline_updated(&*store, &session_id, &app_handle, running_of(&state, &session_id));
                 }
-                let _ = reply.send(result);
+                let _ = reply.send(result.map(|_| ()));
             }
             SchedulerMsg::SetTicketStatus {
                 ticket_id,
@@ -1172,6 +1206,16 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                     .map_err(|e| e.to_string());
                 if result.is_ok() {
                     if let Some(t) = ticket {
+                        let t_short: String = t.title.chars().take(30).collect();
+                        record_activity(
+                            &*store,
+                            Some(&app_handle),
+                            &t.session_id,
+                            "pipeline",
+                            &format!("ticket「{t_short}」→ {}", status.as_str()),
+                            None,
+                            "info",
+                        );
                         emit_pipeline_updated(&*store, &t.session_id, &app_handle, running_of(&state, &t.session_id));
                     }
                 }
@@ -1223,6 +1267,21 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                 if let Some(s) = state.sessions.get_mut(&session_id) {
                     s.running_tickets.remove(&ticket_id);
                 }
+                let t_title = store
+                    .get_ticket(&ticket_id)
+                    .ok()
+                    .flatten()
+                    .map(|t| t.title.chars().take(30).collect::<String>())
+                    .unwrap_or_else(|| ticket_id.clone());
+                record_activity(
+                    &*store,
+                    Some(&app_handle),
+                    &session_id,
+                    "agent",
+                    &format!("开发线完成：{t_title}"),
+                    None,
+                    "ok",
+                );
                 emit_pipeline_updated(&*store, &session_id, &app_handle, running_of(&state, &session_id));
             }
             SchedulerMsg::StartRound {
@@ -1266,6 +1325,14 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
             }
             SchedulerMsg::GetRoundArchive { round_id, reply } => {
                 let result = store.get_round_archive(&round_id).map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::ListActivity {
+                session_id,
+                limit,
+                reply,
+            } => {
+                let result = store.list_activity(&session_id, limit).map_err(|e| e.to_string());
                 let _ = reply.send(result);
             }
         }
@@ -1327,6 +1394,7 @@ fn msg_name(msg: &SchedulerMsg) -> &'static str {
         SchedulerMsg::ArchiveRound { .. } => "ArchiveRound",
         SchedulerMsg::ListRounds { .. } => "ListRounds",
         SchedulerMsg::GetRoundArchive { .. } => "GetRoundArchive",
+        SchedulerMsg::ListActivity { .. } => "ListActivity",
     }
 }
 
@@ -1439,12 +1507,24 @@ fn handle_answer_question(
 
     // 6. Check water levels → maybe trigger new batch
     check_water_levels_and_trigger(
-        store,
+        store.clone(),
         state,
         session_id,
         &[question_id.to_string()],
         app_handle,
         tx,
+    );
+
+    let q_short: String = question.question.chars().take(40).collect();
+    let a_short: String = entry.answer.chars().take(60).collect();
+    record_activity(
+        &*store,
+        Some(app_handle),
+        session_id,
+        "interview",
+        &format!("答题：{q_short}"),
+        Some(&a_short),
+        "ok",
     );
 
     Ok(())
@@ -1466,12 +1546,28 @@ fn handle_skip_question(
 
     // Check water levels → maybe trigger new batch
     check_water_levels_and_trigger(
-        store,
+        store.clone(),
         state,
         session_id,
         &[question_id.to_string()],
         app_handle,
         tx,
+    );
+
+    let q_short = store
+        .get_question(question_id)
+        .ok()
+        .flatten()
+        .map(|q| q.question.chars().take(40).collect::<String>())
+        .unwrap_or_else(|| question_id.to_string());
+    record_activity(
+        &*store,
+        Some(app_handle),
+        session_id,
+        "interview",
+        &format!("跳过：{q_short}"),
+        None,
+        "warn",
     );
 
     Ok(())
@@ -3315,6 +3411,28 @@ fn emit_pipeline_updated(
     }
 }
 
+/// Record one meaningful lifecycle/AI-operation entry into the activity feed
+/// (persisted + pushed to UI via the `activity` event). Best-effort — logging
+/// failures must never break the operation itself.
+pub(crate) fn record_activity(
+    store: &dyn Store,
+    app_handle: Option<&AppHandle>,
+    session_id: &str,
+    kind: &str,
+    label: &str,
+    detail: Option<&str>,
+    level: &str,
+) {
+    match store.append_activity(session_id, kind, label, detail, level) {
+        Ok(a) => {
+            if let Some(app) = app_handle {
+                let _ = app.emit("activity", a);
+            }
+        }
+        Err(e) => log::warn!("[activity] append failed: {}", e),
+    }
+}
+
 /// Spawn async spec generation: interview decisions + outline + chat → spec draft.
 fn spawn_spec_generation(
     store: Arc<dyn Store>,
@@ -3394,6 +3512,15 @@ fn spawn_spec_generation(
                     let _ =
                         store.set_session_pipeline_stage(&sid, PipelineStage::SpecDraft);
                     log::info!("[pipeline] spec generated: session={} len={}", sid, spec.len());
+                    record_activity(
+                        &*store,
+                        Some(&app),
+                        &sid,
+                        "pipeline",
+                        "Spec 草稿已生成，待确认",
+                        None,
+                        "info",
+                    );
                 }
             }
             Err(e) => {
@@ -3524,6 +3651,15 @@ fn spawn_tickets_generation(
                         sid,
                         tickets.len()
                     );
+                    record_activity(
+                        &*store,
+                        Some(&app),
+                        &sid,
+                        "pipeline",
+                        &format!("Tickets 草稿已生成（{} 条），待确认", tickets.len()),
+                        None,
+                        "info",
+                    );
                 }
             }
             Err(e) => {
@@ -3609,6 +3745,19 @@ fn launch_ticket_run(
         .get_or_create(session_id)
         .running_tickets
         .insert(ticket_id.to_string());
+    record_activity(
+        &*store,
+        Some(app_handle),
+        session_id,
+        "agent",
+        &format!("启动开发线 {branch}（ticket「{}」×{} 轮迭代）", ticket.title, rounds.clamp(1, 10)),
+        base.as_deref().map(|b| {
+            let b: String = b.chars().take(8).collect();
+            format!("基点 {b}")
+        })
+        .as_deref(),
+        "info",
+    );
     emit_pipeline_updated(&*store, session_id, app_handle, running_of(state, session_id));
     let _ = app_handle.emit(
         "timeline_updated",
@@ -3819,6 +3968,19 @@ fn handle_start_round(
         "round_started",
         serde_json::json!({ "session_id": session_id, "round": round }),
     );
+    record_activity(
+        &*store,
+        Some(app_handle),
+        session_id,
+        "round",
+        &format!("第{}轮开启：{}", round.number, round.title),
+        round.goal.as_deref().map(|g| {
+            let g: String = g.chars().take(80).collect();
+            g
+        })
+        .as_deref(),
+        "ok",
+    );
     emit_pipeline_updated(&*store, session_id, app_handle, running_of(state, session_id));
 
     // Kick off the round's interview outline.
@@ -3908,6 +4070,15 @@ fn handle_archive_round(
     let _ = app_handle.emit(
         "round_archived",
         serde_json::json!({ "session_id": session_id, "round": round }),
+    );
+    record_activity(
+        &*store,
+        Some(app_handle),
+        session_id,
+        "round",
+        &format!("第{}轮归档：{}", round.number, round.title),
+        round.summary.as_deref(),
+        "ok",
     );
     emit_pipeline_updated(&*store, session_id, app_handle, running_of(state, session_id));
     emit_outline_updated(&*store, session_id, app_handle);

@@ -96,6 +96,7 @@ pub fn run() {
             commands::archive_round,
             commands::list_rounds,
             commands::get_round_archive,
+            commands::list_activity,
             commands::generate_prototype,
             commands::get_prototype_versions,
             commands::get_prototype_preview_url,

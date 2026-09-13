@@ -89,6 +89,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "archive_round",
         "list_rounds",
         "get_round_archive",
+        "get_activity",
     ]
 }
 
@@ -492,6 +493,19 @@ pub fn tool_definitions() -> Vec<Value> {
                 "additionalProperties": false
             }),
         }),
+        json!({
+            "name": "get_activity",
+            "description": "读取项目的操作动态流（时间倒序）：MCP 变更调用、流水线阶段转换、轮次开/归档、开发线启停、答题/跳题等。每条含 kind/label/detail/level/时间戳。",
+            "inputSchema": json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "limit": { "type": "integer", "description": "条数上限，默认 100" }
+                },
+                "required": ["session_id"],
+                "additionalProperties": false
+            }),
+        }),
     ]
 }
 
@@ -540,6 +554,7 @@ pub fn call_tool(ctx: &McpContext, name: &str, args: &Value) -> Result<Value, St
         "archive_round" => archive_round(ctx, args),
         "list_rounds" => list_rounds(ctx, args),
         "get_round_archive" => get_round_archive(ctx, args),
+        "get_activity" => get_activity(ctx, args),
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -1365,4 +1380,15 @@ fn get_round_archive(ctx: &McpContext, args: &Value) -> Result<Value, String> {
         reply,
     })?;
     serde_json::to_value(archive).map_err(|e| e.to_string())
+}
+
+fn get_activity(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100);
+    let items = sched_call(ctx, |reply| SchedulerMsg::ListActivity {
+        session_id: id,
+        limit,
+        reply,
+    })?;
+    serde_json::to_value(items).map_err(|e| e.to_string())
 }
