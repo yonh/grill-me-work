@@ -2925,6 +2925,12 @@ fn spawn_batch_generation(
                         q.outline_node_id = None;
                     }
                 }
+                // LLM-chosen ids (q_move_model…) can collide across batches —
+                // INSERT OR REPLACE would silently wipe an answered question.
+                // Uniquify against anything already stored.
+                if store_arc.get_question(&q.id).ok().flatten().is_some() {
+                    q.id = format!("{}_{}", q.id, &uuid::Uuid::new_v4().to_string()[..6]);
+                }
                 let mut offset_guard = display_order_arc.lock().unwrap();
                 q.display_order = *offset_guard;
                 *offset_guard += 1;
@@ -3231,11 +3237,25 @@ fn spawn_outline_generation(
                         },
                     );
                     emit_outline_updated(&*store, &session_id, &app_handle);
+                    let _ = scheduler_tx
+                        .send(SchedulerMsg::OutlineDone {
+                            session_id: session_id.clone(),
+                        })
+                        .await;
                     return;
                 }
 
                 // Normalize node ids: keep provided ones, assign n1..nN when
-                // missing or duplicated.
+                // missing or duplicated. Ids are globally unique (PK) while
+                // nodes are round-scoped — prefix with the round number so a
+                // later round's n1 doesn't collide with an archived one.
+                let round_no = store
+                    .get_current_round(&session_id)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.number)
+                    .unwrap_or(0);
+                let prefix = format!("r{round_no}-");
                 let mut seen = std::collections::HashSet::new();
                 let now = chrono::Utc::now().to_rfc3339();
                 let nodes: Vec<OutlineNode> = parsed
@@ -3246,7 +3266,8 @@ fn spawn_outline_generation(
                             .id
                             .clone()
                             .filter(|s| !s.trim().is_empty())
-                            .unwrap_or_else(|| format!("n{}", i + 1));
+                            .map(|s| format!("{prefix}{s}"))
+                            .unwrap_or_else(|| format!("{prefix}n{}", i + 1));
                         while !seen.insert(id.clone()) {
                             id = format!("{}_{}", id, i + 1);
                         }
@@ -3275,6 +3296,26 @@ fn spawn_outline_generation(
                 crate::agent::push_app_log("outline", &format!("store write done: {:?}", result.is_ok()));
                 if let Err(e) = result {
                     log::error!("[outline] save failed: {}", e);
+                    crate::agent::push_app_log(
+                        "outline",
+                        &format!("store write failed: {} — {}", session_id, e),
+                    );
+                    let _ = store
+                        .set_session_outline_status(&session_id, OutlineStatus::None);
+                    let _ = app_handle.emit(
+                        EVENT_ERROR,
+                        ErrorPayload {
+                            session_id: session_id.clone(),
+                            message: format!("访谈大纲保存失败：{e}（可重试）"),
+                            kind: "generation".to_string(),
+                        },
+                    );
+                    emit_outline_updated(&*store, &session_id, &app_handle);
+                    let _ = scheduler_tx
+                        .send(SchedulerMsg::OutlineDone {
+                            session_id: session_id.clone(),
+                        })
+                        .await;
                     return;
                 }
                 log::info!(
