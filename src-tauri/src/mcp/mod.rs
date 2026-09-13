@@ -7,7 +7,9 @@
 //! - `POST /mcp` — JSON-RPC 2.0: initialize / tools/list / tools/call
 //! - `GET  /health` — liveness + port info
 //!
-//! First tool: `list_sessions`. More tools register in `tools.rs`.
+//! Tools register in `tools.rs`. Session tools cover the full interview loop:
+//! create → outline review/confirm → answer/skip → finish, so an external
+//! agent can run an interview given only a high-level direction.
 
 pub mod protocol;
 pub mod tools;
@@ -189,6 +191,9 @@ mod tests {
 
         let tools = handle_rpc(&ctx, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
         assert!(tools.contains("list_sessions"));
+        assert!(tools.contains("create_session"));
+        assert!(tools.contains("answer_question"));
+        assert!(tools.contains("confirm_outline"));
 
         let call = handle_rpc(
             &ctx,

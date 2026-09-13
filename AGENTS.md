@@ -90,13 +90,42 @@ Grill-Me **不自己写原型代码**。每次需要更新时：
 
 已实现工具：
 
-- `list_sessions` — 列出项目/会话（含 `is_active`、工作区路径）
+会话发现：
+
+- `list_sessions` — 列出项目/会话（含 `is_active`、工作区路径、outline_status）
 - `get_active_session` — 当前打开的项目
 - `set_active_session` — 切换打开的项目（UI 会跟随 `active_session_changed` 事件）
 
+访谈回路（agent 可驱动完整访谈）：
+
+- `create_session` — {title, role?, initial_context?} 建会话并自动生成大纲
+- `get_session_state` — 状态快照：大纲节点覆盖 + 各状态题数（轮询入口）
+- `get_outline` / `generate_outline` / `save_outline` — 读/重生/编辑大纲（save 支持 excluded 排除节点）
+- `confirm_outline` / `dismiss_outline` — 确认大纲开始出题 / 放弃大纲转自由模式
+- `list_questions` — {status?} 列问题（含 options 与所属节点标题）
+- `answer_question` — answer 传字符串（开放）或 `{kind:"choice"|"multi"|"open",...}`
+- `skip_question` — 跳题（负面信号）
+- `send_message` — 发访谈对话消息，表达方向/约束
+- `request_batch` — 手动补一批题
+- `finish_session` — 结束会话，返回决策+总结
+- `generate_prototype` — 触发原型生成（阻塞至 agent 跑完，返回 version/changelog/file_count）
+- `get_messages` / `get_prototype_versions` — 读对话记录 / 原型版本历史
+- `regenerate_stale` / `dismiss_stale` — 重出/废弃 stale 题
+
+决策树/抽卡式开发：
+
+- `get_timeline` — git 状态 + 提交图（找基点 commit）
+- `checkout_ref` — 切换分支/commit（prototype/ 与预览随之切换）
+- `fork_branch` — 从 commit 检出新分支
+- `run_graph` / `cancel_graph` — 运行/取消迭代蓝图
+
+典型 agent 流程：`create_session` → 轮询 `get_outline` 到 `draft` → `save_outline`/`confirm_outline` → 轮询 `list_questions?status=ready` + `answer_question`/`skip_question` → 节点全覆盖后 `finish_session` → `generate_prototype`。
+
+抽卡模式（单 working dir，**串行分叉**，非真并行）：`get_timeline` 找基点 → `fork_branch("feat-try1")` → `generate_prototype` ×N 轮（每轮自动 commit）→ `checkout_ref` 回基点 → `fork_branch("feat-try2")` → 再迭代 → `get_timeline`/`get_prototype_versions` 对比各线结果。真并行需 git worktree + 每分支独立预览端口，未实现。
+
 「激活项目」存在 SQLite `settings.active_session_id`；UI 选中会话时写入，MCP 也可切换，方便 AI 默认作用于用户正在看的项目。
 
-扩展方式：在 `src-tauri/src/mcp/tools.rs` 注册 tool 定义 + handler；handler 拿 `McpContext`（`store` + `scheduler_tx` + `app`）。
+扩展方式：在 `src-tauri/src/mcp/tools.rs` 注册 tool 定义 + handler；handler 拿 `McpContext`（`store` + `scheduler_tx` + `app`）。MCP 服务跑在普通线程上（非 tokio runtime），调调度器用 `scheduler_tx.blocking_send` + `oneshot::blocking_recv`（见 `sched_call` helper）。
 
 ```bash
 curl -s http://127.0.0.1:8787/health
