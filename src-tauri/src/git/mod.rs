@@ -435,7 +435,7 @@ pub fn sanitize_branch_name(raw: &str) -> String {
     let mut s: String = raw
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/' {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
             } else {
                 '-'
@@ -446,9 +446,26 @@ pub fn sanitize_branch_name(raw: &str) -> String {
         s = s.replace("--", "-");
     }
     let s = s.trim_matches('-').to_string();
-    if s.is_empty() {
-        format!("timeline-{}", chrono::Utc::now().timestamp())
+    let candidate = if s.is_empty() {
+        String::new()
     } else {
         s.chars().take(48).collect()
+    };
+    // Belt: let git itself judge — covers rules we'd otherwise have to
+    // reimplement (no '..', no leading '-'/'.', no '.lock' suffix, no '@{' …).
+    if candidate.is_empty() || !is_valid_branch_name(&candidate) {
+        format!("timeline-{}", chrono::Utc::now().timestamp())
+    } else {
+        candidate
     }
+}
+
+fn is_valid_branch_name(name: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["check-ref-format", "--branch", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false)
 }
