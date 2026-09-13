@@ -12,6 +12,7 @@ pub const EVENT_AGENT_OUTPUT: &str = "agent_output";
 pub const EVENT_GRAPH_PROGRESS: &str = "graph_progress";
 pub const EVENT_GRAPH_NODE_STATUS: &str = "graph_node_status";
 pub const EVENT_TIMELINE_UPDATED: &str = "timeline_updated";
+pub const EVENT_ACTIVE_SESSION: &str = "active_session_changed";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NewQuestionPayload {
@@ -101,4 +102,10 @@ pub struct TimelineUpdatedPayload {
     pub branch: Option<String>,
     pub head: Option<String>,
     pub commit_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveSessionPayload {
+    pub session_id: Option<String>,
+    pub title: Option<String>,
 }

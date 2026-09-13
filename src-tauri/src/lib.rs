@@ -1,3 +1,4 @@
+pub mod active_session;
 pub mod agent;
 pub mod commands;
 pub mod events;
@@ -39,18 +40,29 @@ pub fn run() {
     let (tx, rx) = mpsc::channel::<SchedulerMsg>(100);
     let tx_clone = tx.clone();
 
-    // MCP server so external AI agents can drive Grill-Me (list_sessions, …).
-    let mcp_port = mcp::start_mcp_server(store.clone(), tx.clone());
-    log::info!("[mcp] port={mcp_port}");
-
     let store_for_actor = store.clone();
+    let store_for_mcp = store.clone();
+    let tx_for_mcp = tx.clone();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(ActorHandle { tx })
-        .setup(move |_app| {
+        .manage(store.clone() as Arc<dyn Store>)
+        .setup(move |app| {
+            // MCP server so external AI agents can drive Grill-Me.
+            let port = mcp::start_mcp_server(
+                store_for_mcp,
+                tx_for_mcp,
+                Some(app.handle().clone()),
+            );
+            log::info!("[mcp] port={port}");
+
+            let tx_actor = tx_clone;
+            let store_actor = store_for_actor;
+            let rx = rx;
             tauri::async_runtime::spawn(async move {
-                scheduler::run_actor(store_for_actor, rx, tx_clone).await;
+                scheduler::run_actor(store_actor, rx, tx_actor).await;
             });
             Ok(())
         })
@@ -88,6 +100,8 @@ pub fn run() {
             commands::run_iteration_graph,
             commands::cancel_iteration_graph,
             commands::get_mcp_info,
+            commands::get_active_session,
+            commands::set_active_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

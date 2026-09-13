@@ -23,9 +23,18 @@ pub const DEFAULT_MCP_PORT: u16 = 8787;
 pub type SharedStore = Arc<dyn Store>;
 
 /// Start the MCP HTTP server on 127.0.0.1. Non-blocking (background thread).
-pub fn start_mcp_server(store: SharedStore, scheduler_tx: tokio::sync::mpsc::Sender<crate::scheduler::SchedulerMsg>) -> u16 {
+pub fn start_mcp_server(
+    store: SharedStore,
+    scheduler_tx: tokio::sync::mpsc::Sender<crate::scheduler::SchedulerMsg>,
+    app: Option<tauri::AppHandle>,
+) -> u16 {
     let port = pick_port(DEFAULT_MCP_PORT);
-    let ctx = Arc::new(McpContext { store, scheduler_tx, port });
+    let ctx = Arc::new(McpContext {
+        store,
+        scheduler_tx,
+        app,
+        port,
+    });
 
     std::thread::Builder::new()
         .name("grill-me-mcp".into())
@@ -161,6 +170,7 @@ mod tests {
         Arc::new(McpContext {
             store: Arc::new(store),
             scheduler_tx: tx,
+            app: None,
             port: 0,
         })
     }

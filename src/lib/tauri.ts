@@ -50,6 +50,22 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   listAgentTools: () => invoke<AgentToolStatus[]>("list_agent_tools"),
+  getActiveSession: () =>
+    invoke<{
+      session_id: string | null;
+      title?: string | null;
+      role?: string | null;
+      status?: string | null;
+      prototype_version?: number | null;
+      workspace_path?: string | null;
+      prototype_path?: string | null;
+      has_prototype: boolean;
+    }>("get_active_session"),
+  setActiveSession: (sessionId: string | null) =>
+    invoke<{ session_id: string | null; title?: string | null }>("set_active_session", {
+      sessionId,
+    }),
+  getMcpInfo: () => invoke<Record<string, unknown>>("get_mcp_info"),
   getTimeline: (sessionId: string) => invoke<GitStatus>("get_timeline", { sessionId }),
   initTimeline: (sessionId: string) => invoke<GitStatus>("init_timeline", { sessionId }),
   getPrototypeDirPath: (sessionId: string) =>
@@ -237,4 +253,13 @@ export function onTimelineUpdated(
     head?: string | null;
     commit_count: number;
   }>("timeline_updated", (e) => cb(e.payload));
+}
+
+export function onActiveSessionChanged(
+  cb: (payload: { session_id: string | null; title?: string | null }) => void
+): Promise<UnlistenFn> {
+  return listen<{ session_id: string | null; title?: string | null }>(
+    "active_session_changed",
+    (e) => cb(e.payload)
+  );
 }

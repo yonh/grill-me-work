@@ -209,6 +209,9 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                 log::info!("[scheduler] DeleteSession: id={}", id);
                 let result = store.delete_session(&id).map_err(|e| e.to_string());
                 state.sessions.remove(&id);
+                if result.is_ok() {
+                    crate::active_session::clear_if_matches(store.as_ref(), &id, None);
+                }
                 let _ = reply.send(result);
             }
             SchedulerMsg::GetSessions { reply } => {

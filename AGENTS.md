@@ -90,14 +90,20 @@ Grill-Me **不自己写原型代码**。每次需要更新时：
 
 已实现工具：
 
-- `list_sessions` — 列出项目/会话（id、标题、状态、工作区路径、是否已有原型）
+- `list_sessions` — 列出项目/会话（含 `is_active`、工作区路径）
+- `get_active_session` — 当前打开的项目
+- `set_active_session` — 切换打开的项目（UI 会跟随 `active_session_changed` 事件）
 
-扩展方式：在 `src-tauri/src/mcp/tools.rs` 注册 tool 定义 + handler；handler 拿 `McpContext`（`store` + `scheduler_tx`）。
+「激活项目」存在 SQLite `settings.active_session_id`；UI 选中会话时写入，MCP 也可切换，方便 AI 默认作用于用户正在看的项目。
+
+扩展方式：在 `src-tauri/src/mcp/tools.rs` 注册 tool 定义 + handler；handler 拿 `McpContext`（`store` + `scheduler_tx` + `app`）。
 
 ```bash
 curl -s http://127.0.0.1:8787/health
 curl -s http://127.0.0.1:8787/mcp -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_sessions","arguments":{}}}'
+curl -s http://127.0.0.1:8787/mcp -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"set_active_session","arguments":{"session_id":"<id>"}}}'
 ```
 
 ## 事件

@@ -1,5 +1,6 @@
 use crate::model::*;
 use crate::scheduler::SchedulerMsg;
+use crate::store::Store;
 use tauri::{AppHandle, State};
 use tokio::sync::oneshot;
 
@@ -602,4 +603,26 @@ pub async fn get_mcp_info() -> Result<serde_json::Value, String> {
         "endpoint_hint": format!("http://127.0.0.1:{}/mcp", crate::mcp::DEFAULT_MCP_PORT),
         "health_hint": format!("http://127.0.0.1:{}/health", crate::mcp::DEFAULT_MCP_PORT),
     }))
+}
+
+/// Currently open project (shared with MCP).
+#[tauri::command]
+pub async fn get_active_session(
+    store: State<'_, std::sync::Arc<dyn Store>>,
+) -> Result<crate::active_session::ActiveSessionInfo, String> {
+    Ok(crate::active_session::describe(store.inner().as_ref()))
+}
+
+/// Switch the currently open project; UI listens to `active_session_changed`.
+#[tauri::command]
+pub async fn set_active_session(
+    session_id: Option<String>,
+    store: State<'_, std::sync::Arc<dyn Store>>,
+    app_handle: AppHandle,
+) -> Result<crate::active_session::ActiveSessionInfo, String> {
+    crate::active_session::set_active(
+        store.inner().as_ref(),
+        session_id.as_deref(),
+        Some(&app_handle),
+    )
 }
