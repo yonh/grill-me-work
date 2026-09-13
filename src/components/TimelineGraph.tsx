@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   FolderOpen,
   GitBranch,
-  GitCommitHorizontal,
   Loader2,
   RefreshCw,
   Split,
@@ -153,6 +152,76 @@ export function TimelineGraph({ sessionId, onPreviewRefresh }: TimelineGraphProp
     [commits, selected]
   );
 
+  // --- lane layout: assign each commit a column, compute edges to parents ---
+  const ROW_H = 48;
+  const LANE_W = 14;
+  const LANE_COLORS = [
+    "#6366f1", "#22c55e", "#f59e0b", "#ec4899",
+    "#06b6d4", "#a855f7", "#ef4444", "#84cc16",
+  ];
+
+  const graph = useMemo(() => {
+    interface Row { c: TimelineCommit; lane: number }
+    interface Edge { fromRow: number; fromLane: number; toRow: number; toLane: number }
+
+    const lanes: (string | null)[] = []; // lane → sha it expects next
+    const laneOf = new Map<string, number>();
+    const rows: Row[] = [];
+    const pendingEdges: { fromRow: number; fromLane: number; parent: string }[] = [];
+
+    commits.forEach((c, i) => {
+      let lane = laneOf.get(c.sha);
+      if (lane === undefined) {
+        lane = lanes.findIndex((s) => s === null);
+        if (lane === -1) { lane = lanes.length; lanes.push(null); }
+      }
+      lanes[lane] = null;
+      laneOf.delete(c.sha);
+      // merge case: other lanes also expecting this sha are freed
+      lanes.forEach((s, l) => {
+        if (s === c.sha) { lanes[l] = null; laneOf.delete(c.sha); }
+      });
+      rows.push({ c, lane });
+
+      c.parent_shas.forEach((p, pi) => {
+        pendingEdges.push({ fromRow: i, fromLane: lane!, parent: p });
+        if (laneOf.has(p)) return;
+        let pLane: number;
+        if (pi === 0) {
+          pLane = lane!; // first parent continues the same lane
+        } else {
+          pLane = lanes.findIndex((s) => s === null);
+          if (pLane === -1) { pLane = lanes.length; lanes.push(null); }
+        }
+        lanes[pLane] = p;
+        laneOf.set(p, pLane);
+      });
+    });
+
+    const rowOf = new Map(rows.map((r, i) => [r.c.sha, i]));
+    const laneByRow = rows.map((r) => r.lane);
+    const edges: Edge[] = pendingEdges.map((e) => {
+      const toRow = rowOf.get(e.parent) ?? commits.length; // off-screen → past last row
+      const toLane = toRow < commits.length ? laneByRow[toRow] : (laneOf.get(e.parent) ?? e.fromLane);
+      return { ...e, toRow, toLane };
+    });
+
+    return { rows, edges, laneCount: Math.max(1, lanes.length) };
+  }, [commits]);
+
+  const laneColor = (lane: number) => LANE_COLORS[lane % LANE_COLORS.length];
+  const nodeX = (lane: number) => lane * LANE_W + 10;
+  const nodeY = (row: number) => row * ROW_H + ROW_H / 2;
+  const graphW = graph.laneCount * LANE_W + 16;
+
+  // Lane of the current branch tip (fallback: HEAD commit's lane)
+  const currentLane = useMemo(() => {
+    const tip = graph.rows.find((r) =>
+      status?.branch ? r.c.branch_tips.includes(status.branch) : false
+    ) ?? graph.rows.find((r) => r.c.is_head);
+    return tip?.lane ?? 0;
+  }, [graph.rows, status?.branch]);
+
   if (!status) {
     return (
       <div className="flex h-full items-center justify-center gap-2 text-xs text-muted-foreground">
@@ -292,61 +361,96 @@ export function TimelineGraph({ sessionId, onPreviewRefresh }: TimelineGraphProp
           </div>
 
           <ScrollArea className="min-h-0 flex-1">
-            <div className="space-y-0.5 p-2">
-              {commits.length === 0 && (
-                <p className="px-2 py-4 text-center text-xs text-muted-foreground">
-                  仓库已初始化，还没有 commit。生成一次原型即可写入历史。
-                </p>
-              )}
-              {commits.map((c) => (
-                <button
-                  key={c.sha}
-                  type="button"
-                  onClick={() => setSelected(c.short_sha)}
-                  className={cn(
-                    "flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
-                    selected === c.short_sha ? "bg-accent" : "hover:bg-accent/50"
-                  )}
-                >
-                  <GitCommitHorizontal
-                    className={cn(
-                      "mt-0.5 h-3.5 w-3.5 shrink-0",
-                      c.is_head ? "text-primary" : "text-muted-foreground"
-                    )}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-1">
-                      <span
-                        className={cn(
-                          "truncate text-xs",
-                          c.is_head ? "font-semibold text-foreground" : "text-foreground/90"
-                        )}
-                      >
-                        {c.subject}
-                      </span>
-                      {c.branch_tips.map((b) => (
-                        <Badge
-                          key={b}
-                          variant={b === status.branch ? "default" : "outline"}
-                          className="px-1 py-0 text-[9px]"
-                        >
-                          {b}
-                        </Badge>
-                      ))}
-                    </div>
-                    <div className="mt-0.5 flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
-                      <span>{c.short_sha}</span>
-                      {c.version != null && <span>v{c.version}</span>}
-                      <span>{c.author_time.slice(0, 16).replace("T", " ")}</span>
-                    </div>
-                    {c.body && selected === c.short_sha && (
-                      <p className="mt-1 whitespace-pre-wrap rounded bg-muted/40 p-1.5 text-[10px] leading-relaxed text-muted-foreground">
-                        {c.body}
-                      </p>
-                    )}
-                  </div>
-                </button>
-              ))}
+            <div className="relative p-2">
+              {/* lane rail: SVG edges + nodes over fixed-height rows */}
+              <svg
+                className="absolute left-2 top-2"
+                width={graphW}
+                height={commits.length * ROW_H}
+                style={{ overflow: "visible" }}
+              >
+                {graph.edges.map((e, i) => {
+                  const x1 = nodeX(e.fromLane), y1 = nodeY(e.fromRow);
+                  const x2 = nodeX(e.toLane), y2 = nodeY(e.toRow);
+                  const mid = Math.min(16, (y2 - y1) / 2);
+                  const isCurrent = e.fromLane === currentLane;
+                  return (
+                    <path
+                      key={i}
+                      d={`M ${x1} ${y1} C ${x1} ${y1 + mid}, ${x2} ${y2 - mid}, ${x2} ${y2}`}
+                      fill="none"
+                      stroke={laneColor(e.fromLane)}
+                      strokeWidth={isCurrent ? 3 : 1.5}
+                      opacity={isCurrent ? 1 : 0.6}
+                    />
+                  );
+                })}
+                {graph.rows.map((r, i) => {
+                  const isCurrent = r.lane === currentLane;
+                  return (
+                    <g key={r.c.sha}>
+                      <circle
+                        cx={nodeX(r.lane)}
+                        cy={nodeY(i)}
+                        r={r.c.is_head ? 5 : isCurrent ? 4.5 : 3.5}
+                        fill={laneColor(r.lane)}
+                        stroke={r.c.is_head ? "var(--background)" : "none"}
+                        strokeWidth={r.c.is_head ? 2 : 0}
+                      />
+                    </g>
+                  );
+                })}
+              </svg>
+
+              <div style={{ paddingLeft: graphW }}>
+                {commits.length === 0 && (
+                  <p className="px-2 py-4 text-center text-xs text-muted-foreground">
+                    仓库已初始化，还没有 commit。生成一次原型即可写入历史。
+                  </p>
+                )}
+                {graph.rows.map((r) => {
+                  const c = r.c;
+                  return (
+                    <button
+                      key={c.sha}
+                      type="button"
+                      onClick={() => setSelected(c.short_sha)}
+                      style={{ height: ROW_H }}
+                      className={cn(
+                        "flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
+                        selected === c.short_sha ? "bg-accent" : "hover:bg-accent/50"
+                      )}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1">
+                          <span
+                            className={cn(
+                              "truncate text-xs",
+                              c.is_head ? "font-semibold text-foreground" : "text-foreground/90"
+                            )}
+                          >
+                            {c.subject}
+                          </span>
+                          {c.branch_tips.map((b) => (
+                            <Badge
+                              key={b}
+                              variant={b === status.branch ? "default" : "outline"}
+                              className="shrink-0 px-1 py-0 text-[9px]"
+                            >
+                              {b}
+                            </Badge>
+                          ))}
+                        </div>
+                        <div className="mt-0.5 flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
+                          <span>{c.short_sha}</span>
+                          {c.version != null && <span>v{c.version}</span>}
+                          <span>{c.author_time.slice(0, 16).replace("T", " ")}</span>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </ScrollArea>
         </>
