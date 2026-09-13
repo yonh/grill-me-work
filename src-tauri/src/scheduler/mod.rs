@@ -191,6 +191,82 @@ pub enum SchedulerMsg {
         session_id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    // --- Pipeline: spec + tickets (gated development flow) ---
+    GetPipeline {
+        session_id: String,
+        reply: oneshot::Sender<Result<PipelineInfo, String>>,
+    },
+    /// Generate/regenerate the spec draft from interview decisions.
+    GenerateSpec {
+        session_id: String,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Save user edits to the spec draft (spec_draft stage only).
+    SaveSpec {
+        session_id: String,
+        spec: String,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Confirm the spec → mirrors docs/spec.md and auto-generates tickets.
+    ConfirmSpec {
+        session_id: String,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Generate/regenerate the ticket list from the confirmed spec.
+    GenerateTickets {
+        session_id: String,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Save user edits to tickets (tickets_draft stage only).
+    SaveTickets {
+        session_id: String,
+        tickets: Vec<Ticket>,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Confirm tickets → stage becomes `developing`, dev lines unblocked.
+    ConfirmTickets {
+        session_id: String,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    SetTicketStatus {
+        ticket_id: String,
+        status: TicketStatus,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Run a dev line for one ticket: fork a branch from `from_sha` (or HEAD),
+    /// then run `rounds` agent iterations on it. Async — reply returns the branch
+    /// name once launched; progress via `tickets_updated`/`timeline_updated`.
+    RunTicket {
+        session_id: String,
+        ticket_id: String,
+        rounds: i32,
+        branch_name: Option<String>,
+        from_sha: Option<String>,
+        feedback: Option<String>,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Internal: spec generation task finished (clears spec_generating).
+    SpecDone {
+        session_id: String,
+    },
+    /// Internal: tickets generation task finished (clears tickets_generating).
+    TicketsDone {
+        session_id: String,
+    },
+    /// Internal: a ticket dev line finished (clears running_tickets).
+    TicketRunDone {
+        session_id: String,
+        ticket_id: String,
+        app_handle: AppHandle,
+    },
 }
 
 /// Per-session scheduler state.
@@ -203,6 +279,12 @@ struct SessionState {
     saturated: bool,
     /// An outline generation task is in flight (in-memory; clears on OutlineDone).
     outline_generating: bool,
+    /// A spec generation task is in flight (clears on SpecDone).
+    spec_generating: bool,
+    /// A tickets generation task is in flight (clears on TicketsDone).
+    tickets_generating: bool,
+    /// Ticket ids with a dev line currently running.
+    running_tickets: std::collections::HashSet<String>,
 }
 
 /// Outline info returned to the frontend.
@@ -210,6 +292,17 @@ struct SessionState {
 pub struct OutlineInfo {
     pub status: OutlineStatus,
     pub nodes: Vec<OutlineNode>,
+}
+
+/// Pipeline snapshot returned to the frontend/MCP.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PipelineInfo {
+    pub stage: PipelineStage,
+    pub spec: Option<String>,
+    pub tickets: Vec<Ticket>,
+    /// Ticket ids with a dev line currently running.
+    #[serde(default)]
+    pub running: Vec<String>,
 }
 
 /// The scheduler actor's shared state.
@@ -393,6 +486,23 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                 reply,
             } => {
                 log::info!("[scheduler] GeneratePrototype: session={}, feedback={}", session_id, feedback.as_deref().map(|s| s.len()).unwrap_or(0));
+                // Pipeline gate: sessions on the staged flow may only develop after
+                // tickets are confirmed. Legacy sessions (stage = none) are ungated.
+                let gated = store
+                    .get_session(&session_id)
+                    .ok()
+                    .flatten()
+                    .map(|s| {
+                        s.pipeline_stage != PipelineStage::None
+                            && s.pipeline_stage != PipelineStage::Developing
+                    })
+                    .unwrap_or(false);
+                if gated {
+                    let _ = reply.send(Err(
+                        "流水线未进入开发阶段：请先确认 spec 并确认 tickets".to_string()
+                    ));
+                    continue;
+                }
                 let trigger = if feedback.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
                     "用户反馈修改".to_string()
                 } else {
@@ -826,6 +936,230 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                 }
                 let _ = reply.send(Ok(()));
             }
+            SchedulerMsg::GetPipeline { session_id, reply } => {
+                let result = build_pipeline_info(&*store, &session_id, running_of(&state, &session_id));
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::GenerateSpec {
+                session_id,
+                app_handle,
+                reply,
+            } => {
+                log::info!("[scheduler] GenerateSpec: session={}", session_id);
+                if state.get_or_create(&session_id).spec_generating {
+                    let _ = reply.send(Err("spec 生成中，请稍候".to_string()));
+                    continue;
+                }
+                spawn_spec_generation(store.clone(), &session_id, &app_handle, tx.clone());
+                state.get_or_create(&session_id).spec_generating = true;
+                let _ = reply.send(Ok(()));
+            }
+            SchedulerMsg::SaveSpec {
+                session_id,
+                spec,
+                app_handle,
+                reply,
+            } => {
+                let stage = store
+                    .get_session(&session_id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.pipeline_stage)
+                    .unwrap_or(PipelineStage::None);
+                let result = if stage != PipelineStage::SpecDraft {
+                    Err("仅 spec_draft 阶段可编辑 spec".to_string())
+                } else {
+                    store
+                        .set_session_spec(&session_id, Some(&spec))
+                        .map_err(|e| e.to_string())
+                };
+                if result.is_ok() {
+                    emit_pipeline_updated(&*store, &session_id, &app_handle, running_of(&state, &session_id));
+                }
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::ConfirmSpec {
+                session_id,
+                app_handle,
+                reply,
+            } => {
+                log::info!("[scheduler] ConfirmSpec: session={}", session_id);
+                let session = store
+                    .get_session(&session_id)
+                    .ok()
+                    .flatten();
+                let result = match &session {
+                    Some(s) if s.pipeline_stage == PipelineStage::SpecDraft => {
+                        match &s.spec {
+                            Some(spec) if !spec.trim().is_empty() => {
+                                // Mirror to docs/spec.md so the agent can read it.
+                                let ws = crate::workspace::ensure_workspace(&session_id)
+                                    .map_err(|e| e.to_string());
+                                match ws {
+                                    Ok(dir) => {
+                                        let docs = dir.join("docs");
+                                        let _ = std::fs::create_dir_all(&docs);
+                                        let _ = std::fs::write(docs.join("spec.md"), spec);
+                                    }
+                                    Err(e) => log::warn!("[pipeline] spec.md write failed: {e}"),
+                                }
+                                spawn_tickets_generation(
+                                    store.clone(),
+                                    &session_id,
+                                    &app_handle,
+                                    tx.clone(),
+                                );
+                                state.get_or_create(&session_id).tickets_generating = true;
+                                Ok(())
+                            }
+                            _ => Err("spec 为空，无法确认".to_string()),
+                        }
+                    }
+                    _ => Err("当前不在 spec_draft 阶段".to_string()),
+                };
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::GenerateTickets {
+                session_id,
+                app_handle,
+                reply,
+            } => {
+                log::info!("[scheduler] GenerateTickets: session={}", session_id);
+                if state.get_or_create(&session_id).tickets_generating {
+                    let _ = reply.send(Err("tickets 生成中，请稍候".to_string()));
+                    continue;
+                }
+                let has_spec = store
+                    .get_session(&session_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.spec)
+                    .map(|sp| !sp.trim().is_empty())
+                    .unwrap_or(false);
+                if !has_spec {
+                    let _ = reply.send(Err("缺少 spec：请先生成并确认 spec".to_string()));
+                    continue;
+                }
+                spawn_tickets_generation(store.clone(), &session_id, &app_handle, tx.clone());
+                state.get_or_create(&session_id).tickets_generating = true;
+                let _ = reply.send(Ok(()));
+            }
+            SchedulerMsg::SaveTickets {
+                session_id,
+                tickets,
+                app_handle,
+                reply,
+            } => {
+                let stage = store
+                    .get_session(&session_id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.pipeline_stage)
+                    .unwrap_or(PipelineStage::None);
+                let result = if stage != PipelineStage::TicketsDraft {
+                    Err("仅 tickets_draft 阶段可编辑 tickets".to_string())
+                } else {
+                    store
+                        .replace_tickets(&session_id, &tickets)
+                        .map_err(|e| e.to_string())
+                };
+                if result.is_ok() {
+                    emit_pipeline_updated(&*store, &session_id, &app_handle, running_of(&state, &session_id));
+                }
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::ConfirmTickets {
+                session_id,
+                app_handle,
+                reply,
+            } => {
+                log::info!("[scheduler] ConfirmTickets: session={}", session_id);
+                let session = store
+                    .get_session(&session_id)
+                    .ok()
+                    .flatten();
+                let result = match &session {
+                    Some(s) if s.pipeline_stage == PipelineStage::TicketsDraft => {
+                        let count = store
+                            .get_tickets(&session_id)
+                            .map(|ts| ts.iter().filter(|t| t.status != TicketStatus::Rejected).count())
+                            .unwrap_or(0);
+                        if count == 0 {
+                            Err("tickets 为空，无法确认".to_string())
+                        } else {
+                            store
+                                .set_session_pipeline_stage(&session_id, PipelineStage::Developing)
+                                .map_err(|e| e.to_string())
+                        }
+                    }
+                    _ => Err("当前不在 tickets_draft 阶段".to_string()),
+                };
+                if result.is_ok() {
+                    emit_pipeline_updated(&*store, &session_id, &app_handle, running_of(&state, &session_id));
+                }
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::SetTicketStatus {
+                ticket_id,
+                status,
+                app_handle,
+                reply,
+            } => {
+                let ticket = store.get_ticket(&ticket_id).ok().flatten();
+                let result = store
+                    .set_ticket_status(&ticket_id, status)
+                    .map_err(|e| e.to_string());
+                if result.is_ok() {
+                    if let Some(t) = ticket {
+                        emit_pipeline_updated(&*store, &t.session_id, &app_handle, running_of(&state, &t.session_id));
+                    }
+                }
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::RunTicket {
+                session_id,
+                ticket_id,
+                rounds,
+                branch_name,
+                from_sha,
+                feedback,
+                app_handle,
+                reply,
+            } => {
+                let result = launch_ticket_run(
+                    store.clone(),
+                    &mut state,
+                    &session_id,
+                    &ticket_id,
+                    rounds,
+                    branch_name,
+                    from_sha,
+                    feedback,
+                    &app_handle,
+                    tx.clone(),
+                );
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::SpecDone { session_id } => {
+                if let Some(s) = state.sessions.get_mut(&session_id) {
+                    s.spec_generating = false;
+                }
+            }
+            SchedulerMsg::TicketsDone { session_id } => {
+                if let Some(s) = state.sessions.get_mut(&session_id) {
+                    s.tickets_generating = false;
+                }
+            }
+            SchedulerMsg::TicketRunDone {
+                session_id,
+                ticket_id,
+                app_handle,
+            } => {
+                if let Some(s) = state.sessions.get_mut(&session_id) {
+                    s.running_tickets.remove(&ticket_id);
+                }
+                emit_pipeline_updated(&*store, &session_id, &app_handle, running_of(&state, &session_id));
+            }
         }
     }
     log::warn!("[scheduler] actor stopped (channel closed)");
@@ -869,6 +1203,18 @@ fn msg_name(msg: &SchedulerMsg) -> &'static str {
         SchedulerMsg::DismissOutline { .. } => "DismissOutline",
         SchedulerMsg::RequestBatch { .. } => "RequestBatch",
         SchedulerMsg::OutlineDone { .. } => "OutlineDone",
+        SchedulerMsg::GetPipeline { .. } => "GetPipeline",
+        SchedulerMsg::GenerateSpec { .. } => "GenerateSpec",
+        SchedulerMsg::SaveSpec { .. } => "SaveSpec",
+        SchedulerMsg::ConfirmSpec { .. } => "ConfirmSpec",
+        SchedulerMsg::GenerateTickets { .. } => "GenerateTickets",
+        SchedulerMsg::SaveTickets { .. } => "SaveTickets",
+        SchedulerMsg::ConfirmTickets { .. } => "ConfirmTickets",
+        SchedulerMsg::SetTicketStatus { .. } => "SetTicketStatus",
+        SchedulerMsg::RunTicket { .. } => "RunTicket",
+        SchedulerMsg::SpecDone { .. } => "SpecDone",
+        SchedulerMsg::TicketsDone { .. } => "TicketsDone",
+        SchedulerMsg::TicketRunDone { .. } => "TicketRunDone",
     }
 }
 
@@ -888,6 +1234,8 @@ fn handle_create_session(
         summary: None,
         prototype_version: 0,
         outline_status: OutlineStatus::None,
+        pipeline_stage: PipelineStage::Interviewing,
+        spec: None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -2757,4 +3105,407 @@ fn handle_save_outline(
     emit_outline_updated(&*store, session_id, app_handle);
     check_water_levels_and_trigger(store, state, session_id, &[], app_handle, tx);
     Ok(())
+}
+
+// ==================== Pipeline: spec + tickets ====================
+
+fn running_of(state: &SchedulerState, session_id: &str) -> Vec<String> {
+    state
+        .sessions
+        .get(session_id)
+        .map(|s| s.running_tickets.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn build_pipeline_info(
+    store: &dyn Store,
+    session_id: &str,
+    running: Vec<String>,
+) -> Result<PipelineInfo, String> {
+    let session = store
+        .get_session(session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+    let tickets = store.get_tickets(session_id).map_err(|e| e.to_string())?;
+    Ok(PipelineInfo {
+        stage: session.pipeline_stage,
+        spec: session.spec,
+        tickets,
+        running,
+    })
+}
+
+fn emit_pipeline_updated(
+    store: &dyn Store,
+    session_id: &str,
+    app_handle: &AppHandle,
+    running: Vec<String>,
+) {
+    match build_pipeline_info(store, session_id, running) {
+        Ok(info) => {
+            let _ = app_handle.emit(
+                "pipeline_updated",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "stage": info.stage,
+                    "spec": info.spec,
+                    "tickets": info.tickets,
+                    "running": info.running,
+                }),
+            );
+        }
+        Err(e) => log::warn!("[pipeline] emit failed for {}: {}", session_id, e),
+    }
+}
+
+/// Spawn async spec generation: interview decisions + outline + chat → spec draft.
+fn spawn_spec_generation(
+    store: Arc<dyn Store>,
+    session_id: &str,
+    app_handle: &AppHandle,
+    scheduler_tx: mpsc::Sender<SchedulerMsg>,
+) {
+    let settings = match store.get_all_settings() {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("[pipeline] get settings failed: {}", e);
+            let _ = scheduler_tx.try_send(SchedulerMsg::SpecDone {
+                session_id: session_id.to_string(),
+            });
+            return;
+        }
+    };
+    if settings.api_key.is_empty() {
+        let _ = app_handle.emit(
+            EVENT_ERROR,
+            ErrorPayload {
+                session_id: session_id.to_string(),
+                message: "未设置 API Key，无法生成 spec".to_string(),
+                kind: "auth".to_string(),
+            },
+        );
+        let _ = scheduler_tx.try_send(SchedulerMsg::SpecDone {
+            session_id: session_id.to_string(),
+        });
+        return;
+    }
+
+    let sid = session_id.to_string();
+    let app = app_handle.clone();
+    tokio::spawn(async move {
+        let session = match store.get_session(&sid) {
+            Ok(Some(s)) => s,
+            _ => {
+                log::error!("[pipeline] session not found: {}", sid);
+                let _ = scheduler_tx.try_send(SchedulerMsg::SpecDone { session_id: sid });
+                return;
+            }
+        };
+        let decisions = store.get_decision_summary(&sid).unwrap_or_default();
+        let nodes = store.get_outline_nodes(&sid).unwrap_or_default();
+        let messages = store.get_messages(&sid).unwrap_or_default();
+
+        let client = OpenAIClient::new(
+            settings.base_url,
+            settings.api_key,
+            settings.model_name,
+            settings.temperature,
+        );
+        let sysp = prompt::build_spec_system_prompt(&session.role);
+        let userp = prompt::build_spec_user_prompt(&session, &decisions, &nodes, &messages);
+
+        match client.generate_summary(&sysp, &userp).await {
+            Ok(text) => {
+                let spec = prompt::parse_spec_response(&text);
+                if spec.is_empty() {
+                    let _ = app.emit(
+                        EVENT_ERROR,
+                        ErrorPayload {
+                            session_id: sid.clone(),
+                            message: "spec 生成失败：LLM 返回为空".to_string(),
+                            kind: "generation".to_string(),
+                        },
+                    );
+                } else {
+                    let _ = store.set_session_spec(&sid, Some(&spec));
+                    let _ =
+                        store.set_session_pipeline_stage(&sid, PipelineStage::SpecDraft);
+                    log::info!("[pipeline] spec generated: session={} len={}", sid, spec.len());
+                }
+            }
+            Err(e) => {
+                let _ = app.emit(
+                    EVENT_ERROR,
+                    ErrorPayload {
+                        session_id: sid.clone(),
+                        message: format!("spec 生成失败：{e}"),
+                        kind: "generation".to_string(),
+                    },
+                );
+            }
+        }
+        emit_pipeline_updated(&*store, &sid, &app, Vec::new());
+        let _ = scheduler_tx.try_send(SchedulerMsg::SpecDone { session_id: sid });
+    });
+}
+
+/// Spawn async tickets generation: confirmed spec → ticket draft list.
+fn spawn_tickets_generation(
+    store: Arc<dyn Store>,
+    session_id: &str,
+    app_handle: &AppHandle,
+    scheduler_tx: mpsc::Sender<SchedulerMsg>,
+) {
+    let settings = match store.get_all_settings() {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("[pipeline] get settings failed: {}", e);
+            let _ = scheduler_tx.try_send(SchedulerMsg::TicketsDone {
+                session_id: session_id.to_string(),
+            });
+            return;
+        }
+    };
+    if settings.api_key.is_empty() {
+        let _ = app_handle.emit(
+            EVENT_ERROR,
+            ErrorPayload {
+                session_id: session_id.to_string(),
+                message: "未设置 API Key，无法生成 tickets".to_string(),
+                kind: "auth".to_string(),
+            },
+        );
+        let _ = scheduler_tx.try_send(SchedulerMsg::TicketsDone {
+            session_id: session_id.to_string(),
+        });
+        return;
+    }
+
+    let sid = session_id.to_string();
+    let app = app_handle.clone();
+    tokio::spawn(async move {
+        let session = match store.get_session(&sid) {
+            Ok(Some(s)) => s,
+            _ => {
+                let _ = scheduler_tx.try_send(SchedulerMsg::TicketsDone { session_id: sid });
+                return;
+            }
+        };
+        let spec = session.spec.clone().unwrap_or_default();
+        let client = OpenAIClient::new(
+            settings.base_url,
+            settings.api_key,
+            settings.model_name,
+            settings.temperature,
+        );
+        let sysp = prompt::build_tickets_system_prompt();
+        let userp = prompt::build_tickets_user_prompt(&session, &spec);
+
+        match client.generate_summary(&sysp, &userp).await {
+            Ok(text) => {
+                let parsed = prompt::parse_tickets_response(&text);
+                if parsed.is_empty() {
+                    let _ = app.emit(
+                        EVENT_ERROR,
+                        ErrorPayload {
+                            session_id: sid.clone(),
+                            message: "tickets 生成失败：LLM 返回为空或解析失败".to_string(),
+                            kind: "generation".to_string(),
+                        },
+                    );
+                } else {
+                    let now = chrono::Utc::now().to_rfc3339();
+                    // Key → id: use the LLM key (sanitized) as a stable readable id.
+                    let ids: Vec<String> = parsed
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| {
+                            t.key
+                                .clone()
+                                .filter(|k| !k.trim().is_empty())
+                                .unwrap_or_else(|| format!("t{}", i + 1))
+                        })
+                        .collect();
+                    let mut tickets: Vec<Ticket> = Vec::new();
+                    for (i, lt) in parsed.iter().enumerate() {
+                        let depends_on: Vec<String> = lt
+                            .depends_on
+                            .clone()
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|k| {
+                                // Map dep key to position → resolved id.
+                                parsed
+                                    .iter()
+                                    .position(|t| t.key.as_deref() == Some(k.as_str()))
+                                    .map(|pos| ids[pos].clone())
+                            })
+                            .collect();
+                        tickets.push(Ticket {
+                            id: ids[i].clone(),
+                            session_id: sid.clone(),
+                            title: lt.title.clone().unwrap_or_else(|| format!("ticket {}", i + 1)),
+                            description: lt.description.clone(),
+                            status: TicketStatus::Pending,
+                            depends_on,
+                            branches: Vec::new(),
+                            display_order: i as i32,
+                            created_at: now.clone(),
+                        });
+                    }
+                    let _ = store.replace_tickets(&sid, &tickets);
+                    let _ = store
+                        .set_session_pipeline_stage(&sid, PipelineStage::TicketsDraft);
+                    log::info!(
+                        "[pipeline] tickets generated: session={} count={}",
+                        sid,
+                        tickets.len()
+                    );
+                }
+            }
+            Err(e) => {
+                let _ = app.emit(
+                    EVENT_ERROR,
+                    ErrorPayload {
+                        session_id: sid.clone(),
+                        message: format!("tickets 生成失败：{e}"),
+                        kind: "generation".to_string(),
+                    },
+                );
+            }
+        }
+        emit_pipeline_updated(&*store, &sid, &app, Vec::new());
+        let _ = scheduler_tx.try_send(SchedulerMsg::TicketsDone { session_id: sid });
+    });
+}
+
+/// Launch a dev line for one ticket: fork a branch then run N agent iterations.
+/// Returns the branch name immediately; iterations run in a spawned task.
+#[allow(clippy::too_many_arguments)]
+fn launch_ticket_run(
+    store: Arc<dyn Store>,
+    state: &mut SchedulerState,
+    session_id: &str,
+    ticket_id: &str,
+    rounds: i32,
+    branch_name: Option<String>,
+    from_sha: Option<String>,
+    feedback: Option<String>,
+    app_handle: &AppHandle,
+    scheduler_tx: mpsc::Sender<SchedulerMsg>,
+) -> Result<String, String> {
+    let session = store
+        .get_session(session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+    if session.pipeline_stage != PipelineStage::Developing {
+        return Err("流水线未进入开发阶段：请先确认 tickets".to_string());
+    }
+    let ticket = store
+        .get_ticket(ticket_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("ticket {ticket_id} not found"))?;
+    if ticket.status == TicketStatus::Rejected {
+        return Err("ticket 已被废弃".to_string());
+    }
+    if state
+        .sessions
+        .get(session_id)
+        .map(|s| s.running_tickets.contains(ticket_id))
+        .unwrap_or(false)
+    {
+        return Err("该 ticket 已有开发线在运行".to_string());
+    }
+
+    let ws = crate::workspace::ensure_workspace(session_id).map_err(|e| e.to_string())?;
+    let _ = crate::git::ensure_repo(&ws);
+    let base = from_sha.or_else(|| crate::git::head_sha(&ws));
+
+    let mut branch = branch_name.unwrap_or_else(|| {
+        format!(
+            "t{}-{}",
+            ticket.display_order + 1,
+            crate::git::sanitize_branch_name(&ticket.title)
+        )
+    });
+    // Ensure uniqueness across existing branches.
+    if let Ok(existing) = crate::git::list_branches(&ws) {
+        if existing.iter().any(|b| b == &branch) {
+            let mut n = 2;
+            while existing.iter().any(|b| b == &format!("{branch}-{n}")) {
+                n += 1;
+            }
+            branch = format!("{branch}-{n}");
+        }
+    }
+
+    crate::git::checkout_new_branch(&ws, &branch, base.as_deref())?;
+    let _ = store.add_ticket_branch(ticket_id, &branch);
+    let _ = store.set_ticket_status(ticket_id, TicketStatus::InProgress);
+    state
+        .get_or_create(session_id)
+        .running_tickets
+        .insert(ticket_id.to_string());
+    emit_pipeline_updated(&*store, session_id, app_handle, running_of(state, session_id));
+    let _ = app_handle.emit(
+        "timeline_updated",
+        serde_json::json!({ "session_id": session_id }),
+    );
+
+    // Spawn the iteration loop.
+    let sid = session_id.to_string();
+    let tid = ticket_id.to_string();
+    let app = app_handle.clone();
+    let ticket_title = ticket.title.clone();
+    let ticket_desc = ticket.description.clone().unwrap_or_default();
+    let branch_name_owned = branch.clone();
+    let rounds = rounds.clamp(1, 10);
+    tauri::async_runtime::spawn(async move {
+        for i in 1..=rounds {
+            let fb = format!(
+                "【ticket {tid}】{ticket_title}\n{ticket_desc}\n\n补充要求：{}\n(分支 {branch_name_owned} · 第 {i}/{rounds} 轮迭代)",
+                feedback.clone().unwrap_or_else(|| "按 ticket 描述实现".to_string())
+            );
+            match handle_generate_prototype(
+                &*store,
+                &sid,
+                Some(&fb),
+                Some(&format!("ticket {ticket_title} 第{i}轮")),
+                &app,
+            )
+            .await
+            {
+                Ok(r) => log::info!(
+                    "[ticket] {} round {}/{} done: v{}",
+                    tid, i, rounds, r.version
+                ),
+                Err(e) => {
+                    log::error!("[ticket] {} round {}/{} failed: {}", tid, i, rounds, e);
+                    let _ = app.emit(
+                        EVENT_ERROR,
+                        ErrorPayload {
+                            session_id: sid.clone(),
+                            message: format!("ticket {ticket_title} 第{i}轮失败：{e}"),
+                            kind: "prototype".to_string(),
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+        let _ = app.emit(
+            "timeline_updated",
+            serde_json::json!({ "session_id": sid }),
+        );
+        let _ = scheduler_tx
+            .send(SchedulerMsg::TicketRunDone {
+                session_id: sid.clone(),
+                ticket_id: tid.clone(),
+                app_handle: app.clone(),
+            })
+            .await;
+        log::info!("[ticket] {} run finished on branch {}", tid, branch_name_owned);
+    });
+
+    Ok(branch)
 }

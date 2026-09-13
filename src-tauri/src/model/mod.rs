@@ -15,8 +15,96 @@ pub struct Session {
     pub prototype_version: i32,
     /// Interview outline lifecycle: none | generating | draft | confirmed
     pub outline_status: OutlineStatus,
+    /// Pipeline stage gating development: none(legacy) | interviewing | spec_draft | tickets_draft | developing
+    pub pipeline_stage: PipelineStage,
+    /// Product spec markdown (draft or confirmed; mirrored to docs/spec.md on confirm).
+    pub spec: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Session pipeline stage — the spec→tickets gate before development.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineStage {
+    /// Legacy/free-running session — development ungated.
+    None,
+    /// Interview running (outline + questions).
+    Interviewing,
+    /// Spec generated, awaiting user confirmation.
+    SpecDraft,
+    /// Tickets generated, awaiting user confirmation.
+    TicketsDraft,
+    /// Tickets confirmed — dev lines may run.
+    Developing,
+}
+
+impl PipelineStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PipelineStage::None => "none",
+            PipelineStage::Interviewing => "interviewing",
+            PipelineStage::SpecDraft => "spec_draft",
+            PipelineStage::TicketsDraft => "tickets_draft",
+            PipelineStage::Developing => "developing",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "interviewing" => PipelineStage::Interviewing,
+            "spec_draft" => PipelineStage::SpecDraft,
+            "tickets_draft" => PipelineStage::TicketsDraft,
+            "developing" => PipelineStage::Developing,
+            _ => PipelineStage::None,
+        }
+    }
+}
+
+/// One development ticket — a scoped work item the agent can implement on its own branch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ticket {
+    pub id: String,
+    pub session_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: TicketStatus,
+    /// Ticket ids this ticket depends on.
+    pub depends_on: Vec<String>,
+    /// Git branch names spawned for this ticket (gacha lines).
+    pub branches: Vec<String>,
+    pub display_order: i32,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketStatus {
+    Pending,
+    InProgress,
+    Done,
+    /// User reviewed and dropped this ticket.
+    Rejected,
+}
+
+impl TicketStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TicketStatus::Pending => "pending",
+            TicketStatus::InProgress => "in_progress",
+            TicketStatus::Done => "done",
+            TicketStatus::Rejected => "rejected",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "in_progress" => TicketStatus::InProgress,
+            "done" => TicketStatus::Done,
+            "rejected" => TicketStatus::Rejected,
+            _ => TicketStatus::Pending,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

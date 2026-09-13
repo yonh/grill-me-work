@@ -1,5 +1,5 @@
 use crate::model::schema::{OUTLINE_JSON_TEMPLATE, QUESTION_JSON_TEMPLATE};
-use crate::model::{DecisionEntry, OutlineNode, OutlineNodeStatus, Question, Session};
+use crate::model::{ChatMessage, DecisionEntry, OutlineNode, OutlineNodeStatus, Question, Session};
 use crate::llm::openai::{ApiTool, ApiFunction};
 
 /// Build the role-specific directive that guides question direction and depth.
@@ -598,3 +598,125 @@ pub fn build_chat_tools() -> Vec<ApiTool> {
 }
 
 
+
+const TICKETS_JSON_TEMPLATE: &str = r#"{
+  "tickets": [
+    {
+      "key": "t1",
+      "title": "短标题",
+      "description": "这条 ticket 要实现什么、验收标准是什么",
+      "depends_on": []
+    }
+  ]
+}"#;
+
+/// Build the system prompt for spec generation (interview → spec stage).
+pub fn build_spec_system_prompt(role: &str) -> String {
+    format!(
+        r#"{role_directive}
+
+你是 grill-me 的需求分析师。基于访谈中用户已确认的决策、访谈大纲和对话记录，输出一份开发规格说明书（spec）。
+
+规则：
+1. 只写用户已经确认或回答过的内容；信息不足的章节标注「待补充」，不要编造
+2. 结构：# 标题 → ## 目标与范围 → ## 功能需求（分点，每点附验收标准）→ ## 技术约束 → ## 非目标（明确不做什么）→ ## 待定问题
+3. 整份 spec 放在一个 <spec> 标签内，Markdown 格式
+4. spec 要能独立指导开发——coding agent 只凭它就能动手"#,
+        role_directive = build_role_directive(role),
+    )
+}
+
+/// Build the user prompt for spec generation.
+pub fn build_spec_user_prompt(
+    session: &Session,
+    decision_summary: &[DecisionEntry],
+    outline_nodes: &[OutlineNode],
+    messages: &[ChatMessage],
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(&format!("项目主题：{}\n", session.title));
+    if let Some(ctx) = &session.initial_context {
+        if !ctx.is_empty() {
+            prompt.push_str(&format!("初始上下文：{}\n", ctx));
+        }
+    }
+    if !outline_nodes.is_empty() {
+        prompt.push_str("\n访谈大纲（已确认）：\n");
+        for n in outline_nodes {
+            let mark = match n.status {
+                OutlineNodeStatus::Covered => "✓",
+                OutlineNodeStatus::Excluded => "✗(已排除)",
+                OutlineNodeStatus::Pending => "○",
+            };
+            prompt.push_str(&format!("- {mark} {}：{}\n", n.title, n.description.as_deref().unwrap_or("")));
+        }
+    }
+    if !decision_summary.is_empty() {
+        prompt.push_str("\n已确认决策：\n");
+        for d in decision_summary {
+            prompt.push_str(&format!("- Q: {} → A: {}\n", d.question, d.answer));
+        }
+    }
+    let user_msgs: Vec<&ChatMessage> = messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .rev()
+        .take(10)
+        .collect();
+    if !user_msgs.is_empty() {
+        prompt.push_str("\n用户最近表达的方向（新→旧）：\n");
+        for m in user_msgs {
+            prompt.push_str(&format!("- {}\n", m.content.chars().take(200).collect::<String>()));
+        }
+    }
+    prompt.push_str("\n请生成开发规格说明书。\n");
+    prompt
+}
+
+/// Parse an LLM spec response: markdown inside <spec>...</spec>, or the whole text fallback.
+pub fn parse_spec_response(text: &str) -> String {
+    if let (Some(start), Some(end)) = (text.find("<spec>"), text.rfind("</spec>")) {
+        text[start + "<spec>".len()..end].trim().to_string()
+    } else {
+        text.trim().to_string()
+    }
+}
+
+/// Build the system prompt for tickets generation (spec → tickets stage).
+pub fn build_tickets_system_prompt() -> String {
+    format!(
+        r#"你是 grill-me 的开发规划器。把已确认的 spec 拆成 3-8 条开发 tickets。
+
+规则：
+1. 每条 ticket 是 coding agent 可独立完成的最小有价值单元（一个功能点/模块）
+2. 按实现顺序排序：基础设施在前，UI 与打磨在后
+3. depends_on 引用其他 ticket 的 key，表达必须先完成的依赖；没有依赖就不要写
+4. description 写清楚要做什么 + 验收标准，agent 只凭 description 开发
+5. 输出一个 <tickets> 标签，标签内是单个 JSON 对象
+
+JSON Schema:
+{schema}"#,
+        schema = TICKETS_JSON_TEMPLATE,
+    )
+}
+
+/// Build the user prompt for tickets generation.
+pub fn build_tickets_user_prompt(session: &Session, spec: &str) -> String {
+    format!(
+        "项目主题：{}\n\n已确认的开发规格：\n<spec>\n{}\n</spec>\n\n请拆分成开发 tickets。\n",
+        session.title, spec
+    )
+}
+
+/// Parse an LLM tickets response: JSON inside <tickets>...</tickets>, or raw JSON fallback.
+pub fn parse_tickets_response(text: &str) -> Vec<crate::model::schema::LlmTicketJson> {
+    let json_str = if let (Some(start), Some(end)) = (text.find("<tickets>"), text.rfind("</tickets>")) {
+        &text[start + "<tickets>".len()..end]
+    } else {
+        text.trim()
+    };
+    serde_json::from_str::<crate::model::schema::LlmTicketsJson>(json_str.trim())
+        .ok()
+        .and_then(|t| t.tickets)
+        .unwrap_or_default()
+}

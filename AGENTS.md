@@ -96,6 +96,12 @@ Grill-Me **不自己写原型代码**。每次需要更新时：
 - `get_active_session` — 当前打开的项目
 - `set_active_session` — 切换打开的项目（UI 会跟随 `active_session_changed` 事件）
 
+访谈回路：`create_session` / `get_session_state` / `get_outline` / `generate_outline` / `save_outline` / `confirm_outline` / `dismiss_outline` / `list_questions` / `answer_question` / `skip_question` / `send_message` / `request_batch` / `finish_session` / `get_messages` / `regenerate_stale` / `dismiss_stale`
+
+原型与分支：`generate_prototype` / `get_prototype_versions` / `cancel_prototype` / `get_agent_log` / `get_timeline` / `checkout_ref` / `fork_branch` / `run_graph` / `cancel_graph`
+
+流水线（spec→tickets→分支地图）：`get_pipeline` / `generate_spec` / `save_spec` / `confirm_spec` / `generate_tickets` / `save_tickets` / `confirm_tickets` / `set_ticket_status` / `run_ticket`
+
 访谈回路（agent 可驱动完整访谈）：
 
 - `create_session` — {title, role?, initial_context?} 建会话并自动生成大纲
@@ -135,6 +141,20 @@ curl -s http://127.0.0.1:8787/mcp -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"set_active_session","arguments":{"session_id":"<id>"}}}'
 ```
 
+## 开发流水线（staged flow）
+
+新会话 `pipeline_stage = interviewing`，强制门控：
+
+```
+interviewing ──generate_spec──→ spec_draft ──confirm_spec──→ tickets_draft ──confirm_tickets──→ developing
+```
+
+- `spec_draft`：spec markdown 存 `sessions.spec`，可编辑/重生；确认时写入 `docs/spec.md` 并自动拆 tickets
+- `tickets_draft`：tickets（标题/描述/依赖/排序）可编辑/重生
+- `developing`：`run_ticket` 为某 ticket 开分支线（自动 fork + N 轮 agent 迭代）；同 ticket 可开多线抽卡
+- **门控**：stage≠developing 时 `generate_prototype` 被拒绝（旧会话 stage=none 不受限）
+- 右侧面板「地图」页签：每条 ticket 一条泳道，卡片+分支 commit 链
+
 ## 事件
 
 - `prototype_status`: generating | done | failed
@@ -143,6 +163,7 @@ curl -s http://127.0.0.1:8787/mcp -H 'content-type: application/json' \
 - `graph_progress`: started | step_start | step_done | step_failed | done | cancelled
 - `graph_node_status`: per-node running/completed/failed + commit sha
 - `timeline_updated`: branch/head 变更
+- `pipeline_updated`: { session_id, stage, spec, tickets, running }
 - 以及 v1 的 new_question / stale_marked / batch_status / error / chat_*
 
 ## 布局

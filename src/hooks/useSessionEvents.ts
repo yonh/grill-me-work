@@ -8,6 +8,7 @@ import {
   onBatchStatus,
   onInterviewMayComplete,
   onOutlineUpdated,
+  onPipelineUpdated,
   onChatStream,
   onChatMessageDone,
   onPrototypeStatus,
@@ -120,6 +121,16 @@ export function useSessionEvents(
       });
       if (cancelled) { u6b(); return; }
       unsubs.push(u6b);
+
+      const u6c = await onPipelineUpdated((payload) => {
+        if (currentSessionIdRef.current === payload.session_id) {
+          useSessionStore
+            .getState()
+            .setPipeline(payload.stage, payload.spec ?? null, payload.tickets);
+        }
+      });
+      if (cancelled) { u6c(); return; }
+      unsubs.push(u6c);
 
       const u7 = await onChatStream((sessionId, delta) => {
         if (currentSessionIdRef.current === sessionId) {

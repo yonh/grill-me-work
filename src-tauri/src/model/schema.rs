@@ -42,3 +42,19 @@ pub struct LlmOptionJson {
     pub label: Option<String>,
     pub description: Option<String>,
 }
+
+/// Loose schema for the tickets JSON produced by the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmTicketsJson {
+    pub tickets: Option<Vec<LlmTicketJson>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmTicketJson {
+    /// Short stable key the LLM uses to express dependencies (e.g. "t1").
+    pub key: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    /// Keys of tickets this one depends on.
+    pub depends_on: Option<Vec<String>>,
+}

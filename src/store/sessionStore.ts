@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Session, Question, Settings, OutlineNode, OutlineStatus } from "@/lib/types";
+import type { Session, Question, Settings, OutlineNode, OutlineStatus, PipelineStage, Ticket } from "@/lib/types";
 
 interface SessionStore {
   sessions: Session[];
@@ -11,6 +11,9 @@ interface SessionStore {
   isPrototypeGenerating: boolean;
   outlineStatus: OutlineStatus;
   outlineNodes: OutlineNode[];
+  pipelineStage: PipelineStage;
+  spec: string | null;
+  tickets: Ticket[];
 
   setSessions: (sessions: Session[]) => void;
   setCurrentSession: (id: string | null) => void;
@@ -25,6 +28,7 @@ interface SessionStore {
   setGenerating: (generating: boolean) => void;
   setPrototypeGenerating: (generating: boolean) => void;
   setOutline: (status: OutlineStatus, nodes: OutlineNode[]) => void;
+  setPipeline: (stage: PipelineStage, spec: string | null, tickets: Ticket[]) => void;
   bumpSessionPrototypeVersion: (sessionId: string, version: number) => void;
 }
 
@@ -38,11 +42,14 @@ export const useSessionStore = create<SessionStore>((set) => ({
   isPrototypeGenerating: false,
   outlineStatus: "none",
   outlineNodes: [],
+  pipelineStage: "none",
+  spec: null,
+  tickets: [],
 
   setSessions: (sessions) => set({ sessions }),
 
   setCurrentSession: (id) =>
-    set({ currentSessionId: id, questions: [], outlineStatus: "none", outlineNodes: [] }),
+    set({ currentSessionId: id, questions: [], outlineStatus: "none", outlineNodes: [], pipelineStage: "none", spec: null, tickets: [] }),
 
   addSession: (session) =>
     set((state) => ({ sessions: [session, ...state.sessions] })),
@@ -89,6 +96,8 @@ export const useSessionStore = create<SessionStore>((set) => ({
   setPrototypeGenerating: (isPrototypeGenerating) => set({ isPrototypeGenerating }),
 
   setOutline: (outlineStatus, outlineNodes) => set({ outlineStatus, outlineNodes }),
+
+  setPipeline: (pipelineStage, spec, tickets) => set({ pipelineStage, spec, tickets }),
 
   bumpSessionPrototypeVersion: (sessionId, version) =>
     set((state) => ({

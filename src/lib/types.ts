@@ -52,6 +52,33 @@ export interface Question {
   outline_node_id?: string;
 }
 
+export type PipelineStage =
+  | "none"
+  | "interviewing"
+  | "spec_draft"
+  | "tickets_draft"
+  | "developing";
+
+export type TicketStatus = "pending" | "in_progress" | "done" | "rejected";
+
+export interface Ticket {
+  id: string;
+  session_id: string;
+  title: string;
+  description?: string;
+  status: TicketStatus;
+  depends_on: string[];
+  branches: string[];
+  display_order: number;
+  created_at: string;
+}
+
+export interface PipelineInfo {
+  stage: PipelineStage;
+  spec?: string | null;
+  tickets: Ticket[];
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -61,6 +88,8 @@ export interface Session {
   summary?: string;
   prototype_version: number;
   outline_status: OutlineStatus;
+  pipeline_stage: PipelineStage;
+  spec?: string | null;
   created_at: string;
   updated_at: string;
 }

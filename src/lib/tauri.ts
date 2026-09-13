@@ -16,6 +16,8 @@ import type {
   GitStatus,
   OutlineInfo,
   OutlineNode,
+  PipelineInfo,
+  Ticket,
 } from "./types";
 
 export const api = {
@@ -102,6 +104,33 @@ export const api = {
     invoke<IterationGraph>("run_iteration_graph", { sessionId }),
   cancelIterationGraph: (sessionId: string) =>
     invoke<void>("cancel_iteration_graph", { sessionId }),
+  // --- pipeline: spec → tickets → branch map ---
+  getPipeline: (sessionId: string) => invoke<PipelineInfo>("get_pipeline", { sessionId }),
+  generateSpec: (sessionId: string) => invoke<void>("generate_spec", { sessionId }),
+  saveSpec: (sessionId: string, spec: string) =>
+    invoke<void>("save_spec", { sessionId, spec }),
+  confirmSpec: (sessionId: string) => invoke<void>("confirm_spec", { sessionId }),
+  generateTickets: (sessionId: string) =>
+    invoke<void>("generate_tickets", { sessionId }),
+  saveTickets: (sessionId: string, tickets: Ticket[]) =>
+    invoke<void>("save_tickets", { sessionId, tickets }),
+  confirmTickets: (sessionId: string) =>
+    invoke<void>("confirm_tickets", { sessionId }),
+  setTicketStatus: (ticketId: string, status: string) =>
+    invoke<void>("set_ticket_status", { ticketId, status }),
+  runTicket: (
+    sessionId: string,
+    ticketId: string,
+    opts?: { rounds?: number; branchName?: string; fromSha?: string; feedback?: string }
+  ) =>
+    invoke<string>("run_ticket", {
+      sessionId,
+      ticketId,
+      rounds: opts?.rounds ?? null,
+      branchName: opts?.branchName ?? null,
+      fromSha: opts?.fromSha ?? null,
+      feedback: opts?.feedback ?? null,
+    }),
 };
 
 export function onNewQuestion(cb: (q: Question) => void): Promise<UnlistenFn> {
@@ -274,6 +303,14 @@ export function onTimelineUpdated(
     head?: string | null;
     commit_count: number;
   }>("timeline_updated", (e) => cb(e.payload));
+}
+
+export function onPipelineUpdated(
+  cb: (payload: PipelineInfo & { session_id: string }) => void
+): Promise<UnlistenFn> {
+  return listen<PipelineInfo & { session_id: string }>("pipeline_updated", (e) => {
+    cb(e.payload);
+  });
 }
 
 export function onActiveSessionChanged(

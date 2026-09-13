@@ -746,3 +746,196 @@ pub async fn set_active_session(
         Some(&app_handle),
     )
 }
+
+// --- Pipeline: spec + tickets ---
+
+#[tauri::command]
+pub async fn get_pipeline(
+    session_id: String,
+    state: State<'_, ActorHandle>,
+) -> Result<crate::scheduler::PipelineInfo, String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::GetPipeline { session_id, reply })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn generate_spec(
+    session_id: String,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::GenerateSpec {
+            session_id,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn save_spec(
+    session_id: String,
+    spec: String,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::SaveSpec {
+            session_id,
+            spec,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn confirm_spec(
+    session_id: String,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::ConfirmSpec {
+            session_id,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn generate_tickets(
+    session_id: String,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::GenerateTickets {
+            session_id,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn save_tickets(
+    session_id: String,
+    tickets: Vec<crate::model::Ticket>,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::SaveTickets {
+            session_id,
+            tickets,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn confirm_tickets(
+    session_id: String,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::ConfirmTickets {
+            session_id,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn set_ticket_status(
+    ticket_id: String,
+    status: String,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::SetTicketStatus {
+            ticket_id,
+            status: crate::model::TicketStatus::from_str(&status),
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn run_ticket(
+    session_id: String,
+    ticket_id: String,
+    rounds: Option<i32>,
+    branch_name: Option<String>,
+    from_sha: Option<String>,
+    feedback: Option<String>,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::RunTicket {
+            session_id,
+            ticket_id,
+            rounds: rounds.unwrap_or(3),
+            branch_name,
+            from_sha,
+            feedback,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}

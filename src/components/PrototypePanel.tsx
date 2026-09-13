@@ -16,6 +16,7 @@ import {
   Workflow,
   GitBranch,
   Network,
+  Map as MapIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -30,9 +31,10 @@ import type { PrototypeFile } from "@/lib/types";
 import { IterationCanvas } from "@/components/IterationCanvas";
 import { TimelineGraph } from "@/components/TimelineGraph";
 import { QuestionGraph } from "@/components/QuestionGraph";
+import { BranchMap } from "@/components/BranchMap";
 
 type DeviceId = "desktop" | "tablet" | "mobile";
-type PanelTab = "preview" | "blueprint" | "timeline" | "qgraph";
+type PanelTab = "preview" | "blueprint" | "timeline" | "qgraph" | "branchmap";
 
 const DEVICES: {
   id: DeviceId;
@@ -191,6 +193,7 @@ export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
                 { id: "blueprint" as const, label: "蓝图", icon: Workflow },
                 { id: "timeline" as const, label: "时间线", icon: GitBranch },
                 { id: "qgraph" as const, label: "问题图", icon: Network },
+                { id: "branchmap" as const, label: "地图", icon: MapIcon },
               ]
             ).map((t) => {
               const Icon = t.icon;
@@ -321,6 +324,10 @@ export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
       ) : tab === "qgraph" ? (
         <div className="min-h-0 flex-1">
           <QuestionGraph />
+        </div>
+      ) : tab === "branchmap" ? (
+        <div className="min-h-0 flex-1">
+          <BranchMap />
         </div>
       ) : (
         <>

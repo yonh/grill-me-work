@@ -69,4 +69,14 @@ pub trait Store: Send + Sync + 'static {
     /// Skip all ready/stale questions attached to the given outline nodes.
     fn skip_questions_for_nodes(&self, session_id: &str, node_ids: &[String]) -> Result<()>;
     fn get_skipped_questions(&self, session_id: &str) -> Result<Vec<Question>>;
+    // Pipeline: spec + tickets
+    fn set_session_pipeline_stage(&self, session_id: &str, stage: PipelineStage) -> Result<()>;
+    fn set_session_spec(&self, session_id: &str, spec: Option<&str>) -> Result<()>;
+    fn get_tickets(&self, session_id: &str) -> Result<Vec<Ticket>>;
+    fn get_ticket(&self, ticket_id: &str) -> Result<Option<Ticket>>;
+    /// Replace the whole ticket list (add/edit/delete/reorder in one call).
+    fn replace_tickets(&self, session_id: &str, tickets: &[Ticket]) -> Result<()>;
+    fn set_ticket_status(&self, ticket_id: &str, status: TicketStatus) -> Result<()>;
+    /// Record a git branch created for this ticket (gacha line).
+    fn add_ticket_branch(&self, ticket_id: &str, branch: &str) -> Result<()>;
 }

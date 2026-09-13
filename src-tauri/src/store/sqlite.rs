@@ -244,6 +244,46 @@ impl SqliteStore {
             )?;
         }
 
+        // Migration: pipeline_stage + spec columns on sessions
+        let has_pipeline_stage: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })?;
+            let mut found = false;
+            for row in rows {
+                if row? == "pipeline_stage" {
+                    found = true;
+                }
+            }
+            found
+        };
+        if !has_pipeline_stage {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN pipeline_stage TEXT;
+                 ALTER TABLE sessions ADD COLUMN spec TEXT;",
+            )?;
+        }
+
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS tickets (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                depends_on_json TEXT NOT NULL DEFAULT '[]',
+                branches_json TEXT NOT NULL DEFAULT '[]',
+                display_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_tickets_session ON tickets(session_id);
+            "#,
+        )?;
+
         Ok(())
     }
 }
@@ -258,10 +298,34 @@ fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         summary: row.get("summary")?,
         prototype_version: row.get("prototype_version")?,
         outline_status: OutlineStatus::from_str(row.get::<_, String>("outline_status")?.as_str()),
+        pipeline_stage: row
+            .get::<_, Option<String>>("pipeline_stage")?
+            .map(|s| PipelineStage::from_str(s.as_str()))
+            .unwrap_or(PipelineStage::None),
+        spec: row.get("spec")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
 }
+
+fn row_to_ticket(row: &rusqlite::Row) -> rusqlite::Result<Ticket> {
+    let depends_on_json: String = row.get("depends_on_json")?;
+    let branches_json: String = row.get("branches_json")?;
+    Ok(Ticket {
+        id: row.get("id")?,
+        session_id: row.get("session_id")?,
+        title: row.get("title")?,
+        description: row.get("description")?,
+        status: TicketStatus::from_str(row.get::<_, String>("status")?.as_str()),
+        depends_on: serde_json::from_str(&depends_on_json).unwrap_or_default(),
+        branches: serde_json::from_str(&branches_json).unwrap_or_default(),
+        display_order: row.get("display_order")?,
+        created_at: row.get("created_at")?,
+    })
+}
+
+const TICKET_COLUMNS: &str =
+    "id, session_id, title, description, status, depends_on_json, branches_json, display_order, created_at";
 
 fn row_to_question(row: &rusqlite::Row) -> rusqlite::Result<Question> {
     let options_json: String = row.get("options_json")?;
@@ -300,13 +364,15 @@ impl Store for SqliteStore {
     fn create_session(&self, session: &Session) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, title, initial_context, role, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO sessions (id, title, initial_context, role, status, outline_status, pipeline_stage, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 session.id,
                 session.title,
                 session.initial_context,
                 session.role,
                 session.status.as_str(),
+                session.outline_status.as_str(),
+                session.pipeline_stage.as_str(),
                 session.created_at,
                 session.updated_at,
             ],
@@ -318,6 +384,7 @@ impl Store for SqliteStore {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM decision_summary WHERE session_id = ?1", params![id])?;
         conn.execute("DELETE FROM outline_nodes WHERE session_id = ?1", params![id])?;
+        conn.execute("DELETE FROM tickets WHERE session_id = ?1", params![id])?;
         conn.execute("DELETE FROM questions WHERE session_id = ?1", params![id])?;
         conn.execute("DELETE FROM batches WHERE session_id = ?1", params![id])?;
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -327,7 +394,7 @@ impl Store for SqliteStore {
     fn get_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
-            conn.prepare("SELECT id, title, initial_context, role, status, summary, prototype_version, outline_status, created_at, updated_at FROM sessions ORDER BY created_at DESC")?;
+            conn.prepare("SELECT id, title, initial_context, role, status, summary, prototype_version, outline_status, pipeline_stage, spec, created_at, updated_at FROM sessions ORDER BY created_at DESC")?;
         let rows = stmt.query_map([], row_to_session)?;
         let mut sessions = Vec::new();
         for row in rows {
@@ -339,7 +406,7 @@ impl Store for SqliteStore {
     fn get_session(&self, id: &str) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, initial_context, role, status, summary, prototype_version, outline_status, created_at, updated_at FROM sessions WHERE id = ?1",
+            "SELECT id, title, initial_context, role, status, summary, prototype_version, outline_status, pipeline_stage, spec, created_at, updated_at FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_session)?;
         if let Some(row) = rows.next() {
@@ -946,5 +1013,103 @@ impl Store for SqliteStore {
             questions.push(row?);
         }
         Ok(questions)
+    }
+
+    fn set_session_pipeline_stage(&self, session_id: &str, stage: PipelineStage) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE sessions SET pipeline_stage = ?1, updated_at = ?2 WHERE id = ?3",
+            params![stage.as_str(), now, session_id],
+        )?;
+        Ok(())
+    }
+
+    fn set_session_spec(&self, session_id: &str, spec: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE sessions SET spec = ?1, updated_at = ?2 WHERE id = ?3",
+            params![spec, now, session_id],
+        )?;
+        Ok(())
+    }
+
+    fn get_tickets(&self, session_id: &str) -> Result<Vec<Ticket>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {TICKET_COLUMNS} FROM tickets WHERE session_id = ?1 ORDER BY display_order ASC"
+        ))?;
+        let rows = stmt.query_map(params![session_id], row_to_ticket)?;
+        let mut tickets = Vec::new();
+        for row in rows {
+            tickets.push(row?);
+        }
+        Ok(tickets)
+    }
+
+    fn get_ticket(&self, ticket_id: &str) -> Result<Option<Ticket>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {TICKET_COLUMNS} FROM tickets WHERE id = ?1"
+        ))?;
+        let mut rows = stmt.query_map(params![ticket_id], row_to_ticket)?;
+        if let Some(row) = rows.next() {
+            Ok(Some(row?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn replace_tickets(&self, session_id: &str, tickets: &[Ticket]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM tickets WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        let mut stmt = conn.prepare(&format!(
+            "INSERT INTO tickets ({TICKET_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+        ))?;
+        for t in tickets {
+            stmt.execute(params![
+                t.id,
+                t.session_id,
+                t.title,
+                t.description,
+                t.status.as_str(),
+                serde_json::to_string(&t.depends_on).unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string(&t.branches).unwrap_or_else(|_| "[]".into()),
+                t.display_order,
+                t.created_at,
+            ])?;
+        }
+        Ok(())
+    }
+
+    fn set_ticket_status(&self, ticket_id: &str, status: TicketStatus) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE tickets SET status = ?1 WHERE id = ?2",
+            params![status.as_str(), ticket_id],
+        )?;
+        Ok(())
+    }
+
+    fn add_ticket_branch(&self, ticket_id: &str, branch: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT branches_json FROM tickets WHERE id = ?1")?;
+        let json: Option<String> = stmt
+            .query_row(params![ticket_id], |row| row.get(0))
+            .ok();
+        let Some(json) = json else { return Ok(()) };
+        let mut branches: Vec<String> = serde_json::from_str(&json).unwrap_or_default();
+        if !branches.iter().any(|b| b == branch) {
+            branches.push(branch.to_string());
+        }
+        conn.execute(
+            "UPDATE tickets SET branches_json = ?1 WHERE id = ?2",
+            params![serde_json::to_string(&branches).unwrap_or_else(|_| "[]".into()), ticket_id],
+        )?;
+        Ok(())
     }
 }

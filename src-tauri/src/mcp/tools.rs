@@ -73,6 +73,16 @@ pub fn tool_names() -> Vec<&'static str> {
         "cancel_graph",
         "cancel_prototype",
         "get_agent_log",
+        // --- pipeline: spec → tickets → branch-map development ---
+        "get_pipeline",
+        "generate_spec",
+        "save_spec",
+        "confirm_spec",
+        "generate_tickets",
+        "save_tickets",
+        "confirm_tickets",
+        "set_ticket_status",
+        "run_ticket",
     ]
 }
 
@@ -332,6 +342,102 @@ pub fn tool_definitions() -> Vec<Value> {
                 "additionalProperties": false
             }),
         }),
+        // --- pipeline: spec → tickets → branch-map development ---
+        json!({
+            "name": "get_pipeline",
+            "description": "获取流水线快照：stage（interviewing|spec_draft|tickets_draft|developing|none=旧会话自由模式）、spec 全文、tickets 列表（状态/依赖/分支）。新流程的轮询入口。",
+            "inputSchema": session_id_schema(),
+        }),
+        json!({
+            "name": "generate_spec",
+            "description": "基于访谈决策+大纲+对话生成 spec 草稿（异步，轮询 get_pipeline 直到 stage=spec_draft）。访谈完成后调用。",
+            "inputSchema": session_id_schema(),
+        }),
+        json!({
+            "name": "save_spec",
+            "description": "保存对 spec 草稿的编辑（仅 spec_draft 阶段）。",
+            "inputSchema": json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "spec": { "type": "string", "description": "编辑后的 spec markdown 全文" }
+                },
+                "required": ["session_id", "spec"],
+                "additionalProperties": false
+            }),
+        }),
+        json!({
+            "name": "confirm_spec",
+            "description": "确认 spec——写入 docs/spec.md 并自动开始生成 tickets（stage → tickets_draft）。",
+            "inputSchema": session_id_schema(),
+        }),
+        json!({
+            "name": "generate_tickets",
+            "description": "基于已确认 spec 重新生成 tickets 草稿（异步）。",
+            "inputSchema": session_id_schema(),
+        }),
+        json!({
+            "name": "save_tickets",
+            "description": "保存对 tickets 的编辑（仅 tickets_draft 阶段）：可改标题/描述/依赖/顺序/增删。传完整 tickets 数组。",
+            "inputSchema": json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "tickets": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "title": { "type": "string" },
+                                "description": { "type": "string" },
+                                "status": { "type": "string" },
+                                "depends_on": { "type": "array", "items": { "type": "string" } },
+                                "display_order": { "type": "integer" }
+                            },
+                            "required": ["id", "title"]
+                        }
+                    }
+                },
+                "required": ["session_id", "tickets"],
+                "additionalProperties": false
+            }),
+        }),
+        json!({
+            "name": "confirm_tickets",
+            "description": "确认 tickets——stage → developing，之后才能 run_ticket / generate_prototype（强制门控）。",
+            "inputSchema": session_id_schema(),
+        }),
+        json!({
+            "name": "set_ticket_status",
+            "description": "设置 ticket 状态：pending|in_progress|done|rejected。验收后标 done，废弃标 rejected。",
+            "inputSchema": json!({
+                "type": "object",
+                "properties": {
+                    "ticket_id": { "type": "string" },
+                    "status": { "type": "string" }
+                },
+                "required": ["ticket_id", "status"],
+                "additionalProperties": false
+            }),
+        }),
+        json!({
+            "name": "run_ticket",
+            "description": "为某条 ticket 开一条开发线：从基点 commit（默认 HEAD）fork 分支并自动跑 N 轮 agent 迭代。异步——立即返回分支名，进度看 timeline_updated / get_timeline。同一 ticket 可多次调用开多条抽卡分支。",
+            "inputSchema": json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "ticket_id": { "type": "string" },
+                    "rounds": { "type": "integer", "description": "迭代轮数，默认 3，上限 10" },
+                    "branch_name": { "type": "string", "description": "自定义分支名，默认 t<序号>-<标题>" },
+                    "from_sha": { "type": "string", "description": "基点 commit，默认当前 HEAD" },
+                    "feedback": { "type": "string", "description": "给 agent 的补充要求/实现思路" }
+                },
+                "required": ["session_id", "ticket_id"],
+                "additionalProperties": false
+            }),
+        }),
     ]
 }
 
@@ -366,6 +472,15 @@ pub fn call_tool(ctx: &McpContext, name: &str, args: &Value) -> Result<Value, St
         "cancel_graph" => cancel_graph(ctx, args),
         "cancel_prototype" => cancel_prototype(ctx, args),
         "get_agent_log" => get_agent_log(ctx, args),
+        "get_pipeline" => get_pipeline(ctx, args),
+        "generate_spec" => generate_spec(ctx, args),
+        "save_spec" => save_spec(ctx, args),
+        "confirm_spec" => confirm_spec(ctx, args),
+        "generate_tickets" => generate_tickets(ctx, args),
+        "save_tickets" => save_tickets(ctx, args),
+        "confirm_tickets" => confirm_tickets(ctx, args),
+        "set_ticket_status" => set_ticket_status(ctx, args),
+        "run_ticket" => run_ticket(ctx, args),
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -939,4 +1054,174 @@ fn get_agent_log(ctx: &McpContext, args: &Value) -> Result<Value, String> {
         .map(|n| n as usize);
     let lines = crate::agent::get_agent_log(&id, tail);
     Ok(json!({ "count": lines.len(), "lines": lines }))
+}
+
+// ==================== pipeline: spec → tickets → branch map ====================
+
+fn get_pipeline(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let info = sched_call(ctx, |reply| SchedulerMsg::GetPipeline {
+        session_id: id,
+        reply,
+    })?;
+    Ok(serde_json::to_value(&info).map_err(|e| e.to_string())?)
+}
+
+fn generate_spec(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let app_handle = app(ctx)?;
+    sched_call(ctx, |reply| SchedulerMsg::GenerateSpec {
+        session_id: id,
+        app_handle,
+        reply,
+    })?;
+    Ok(json!({ "ok": true, "note": "spec 生成中，轮询 get_pipeline 直到 stage=spec_draft" }))
+}
+
+fn save_spec(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let spec = arg_str(args, "spec")?.to_string();
+    let app_handle = app(ctx)?;
+    sched_call(ctx, |reply| SchedulerMsg::SaveSpec {
+        session_id: id,
+        spec,
+        app_handle,
+        reply,
+    })?;
+    Ok(json!({ "ok": true }))
+}
+
+fn confirm_spec(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let app_handle = app(ctx)?;
+    sched_call(ctx, |reply| SchedulerMsg::ConfirmSpec {
+        session_id: id,
+        app_handle,
+        reply,
+    })?;
+    Ok(json!({ "ok": true, "note": "spec 已确认并写入 docs/spec.md；tickets 生成中" }))
+}
+
+fn generate_tickets(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let app_handle = app(ctx)?;
+    sched_call(ctx, |reply| SchedulerMsg::GenerateTickets {
+        session_id: id,
+        app_handle,
+        reply,
+    })?;
+    Ok(json!({ "ok": true, "note": "tickets 生成中，轮询 get_pipeline" }))
+}
+
+fn save_tickets(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let arr = args
+        .get("tickets")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "missing tickets array".to_string())?;
+    let sid = id.clone();
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut tickets = Vec::new();
+    for (i, t) in arr.iter().enumerate() {
+        let tid = t
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("tickets[{i}].id missing"))?
+            .to_string();
+        tickets.push(crate::model::Ticket {
+            id: tid,
+            session_id: sid.clone(),
+            title: t
+                .get("title")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("tickets[{i}].title missing"))?
+                .to_string(),
+            description: t
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            status: t
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(crate::model::TicketStatus::from_str)
+                .unwrap_or(crate::model::TicketStatus::Pending),
+            depends_on: t
+                .get("depends_on")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            branches: t
+                .get("branches")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            display_order: t
+                .get("display_order")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32)
+                .unwrap_or(i as i32),
+            created_at: now.clone(),
+        });
+    }
+    let app_handle = app(ctx)?;
+    sched_call(ctx, |reply| SchedulerMsg::SaveTickets {
+        session_id: id,
+        tickets,
+        app_handle,
+        reply,
+    })?;
+    Ok(json!({ "ok": true }))
+}
+
+fn confirm_tickets(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let app_handle = app(ctx)?;
+    sched_call(ctx, |reply| SchedulerMsg::ConfirmTickets {
+        session_id: id,
+        app_handle,
+        reply,
+    })?;
+    Ok(json!({ "ok": true, "note": "stage=developing，可用 run_ticket 开开发线" }))
+}
+
+fn set_ticket_status(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let tid = arg_str(args, "ticket_id")?.to_string();
+    let status = crate::model::TicketStatus::from_str(arg_str(args, "status")?);
+    let app_handle = app(ctx)?;
+    sched_call(ctx, |reply| SchedulerMsg::SetTicketStatus {
+        ticket_id: tid,
+        status,
+        app_handle,
+        reply,
+    })?;
+    Ok(json!({ "ok": true }))
+}
+
+fn run_ticket(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let tid = arg_str(args, "ticket_id")?.to_string();
+    let rounds = args.get("rounds").and_then(|v| v.as_i64()).map(|n| n as i32).unwrap_or(3);
+    let branch_name = args.get("branch_name").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let from_sha = args.get("from_sha").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let feedback = args.get("feedback").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let app_handle = app(ctx)?;
+    let branch = sched_call(ctx, |reply| SchedulerMsg::RunTicket {
+        session_id: id,
+        ticket_id: tid,
+        rounds,
+        branch_name,
+        from_sha,
+        feedback,
+        app_handle,
+        reply,
+    })?;
+    Ok(json!({ "ok": true, "branch": branch, "note": "开发线已启动，用 get_timeline / get_agent_log 观察进度" }))
 }

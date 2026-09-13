@@ -15,6 +15,7 @@ export function useSessions() {
     setLoading,
     setGenerating,
     setOutline,
+    setPipeline,
   } = useSessionStore();
 
   const loadQuestions = useCallback(
@@ -32,8 +33,14 @@ export function useSessions() {
       } catch (err) {
         console.error(err);
       }
+      try {
+        const p = await api.getPipeline(id);
+        setPipeline(p.stage, p.spec ?? null, p.tickets);
+      } catch (err) {
+        console.error(err);
+      }
     },
-    [setQuestions, setOutline]
+    [setQuestions, setOutline, setPipeline]
   );
 
   // Load sessions + restore backend "active session" so UI and MCP stay aligned.

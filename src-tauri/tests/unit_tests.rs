@@ -238,6 +238,7 @@ mod tests {
         batches: Mutex<HashMap<String, Batch>>,
         settings: Mutex<HashMap<String, String>>,
         next_batch_no: Mutex<i32>,
+        tickets: Mutex<HashMap<String, Ticket>>,
     }
 
     impl MockStore {
@@ -259,6 +260,7 @@ mod tests {
                 batches: Mutex::new(HashMap::new()),
                 settings: Mutex::new(settings),
                 next_batch_no: Mutex::new(0),
+                tickets: Mutex::new(HashMap::new()),
             }
         }
 
@@ -464,6 +466,52 @@ mod tests {
                 .cloned()
                 .collect())
         }
+        fn set_session_pipeline_stage(&self, session_id: &str, stage: PipelineStage) -> Result<()> {
+            if let Some(s) = self.sessions.lock().unwrap().get_mut(session_id) {
+                s.pipeline_stage = stage;
+            }
+            Ok(())
+        }
+        fn set_session_spec(&self, session_id: &str, spec: Option<&str>) -> Result<()> {
+            if let Some(s) = self.sessions.lock().unwrap().get_mut(session_id) {
+                s.spec = spec.map(|x| x.to_string());
+            }
+            Ok(())
+        }
+        fn get_tickets(&self, session_id: &str) -> Result<Vec<Ticket>> {
+            let mut ts: Vec<Ticket> = self.tickets.lock().unwrap()
+                .values()
+                .filter(|t| t.session_id == session_id)
+                .cloned()
+                .collect();
+            ts.sort_by_key(|t| t.display_order);
+            Ok(ts)
+        }
+        fn get_ticket(&self, ticket_id: &str) -> Result<Option<Ticket>> {
+            Ok(self.tickets.lock().unwrap().get(ticket_id).cloned())
+        }
+        fn replace_tickets(&self, session_id: &str, tickets: &[Ticket]) -> Result<()> {
+            let mut map = self.tickets.lock().unwrap();
+            map.retain(|_, t| t.session_id != session_id);
+            for t in tickets {
+                map.insert(t.id.clone(), t.clone());
+            }
+            Ok(())
+        }
+        fn set_ticket_status(&self, ticket_id: &str, status: TicketStatus) -> Result<()> {
+            if let Some(t) = self.tickets.lock().unwrap().get_mut(ticket_id) {
+                t.status = status;
+            }
+            Ok(())
+        }
+        fn add_ticket_branch(&self, ticket_id: &str, branch: &str) -> Result<()> {
+            if let Some(t) = self.tickets.lock().unwrap().get_mut(ticket_id) {
+                if !t.branches.iter().any(|b| b == branch) {
+                    t.branches.push(branch.to_string());
+                }
+            }
+            Ok(())
+        }
     }
 
     // ============ Stale marking / dependency graph tests ============
@@ -595,6 +643,8 @@ mod tests {
             summary: None,
             prototype_version: 0,
             outline_status: OutlineStatus::None,
+            pipeline_stage: PipelineStage::None,
+            spec: None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };
@@ -644,6 +694,8 @@ mod tests {
             summary: None,
             prototype_version: 0,
             outline_status: OutlineStatus::None,
+            pipeline_stage: PipelineStage::None,
+            spec: None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };
@@ -688,6 +740,8 @@ mod tests {
             summary: None,
             prototype_version: 0,
             outline_status: OutlineStatus::None,
+            pipeline_stage: PipelineStage::None,
+            spec: None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };
@@ -719,6 +773,8 @@ mod tests {
             summary: None,
             prototype_version: 0,
             outline_status: OutlineStatus::None,
+            pipeline_stage: PipelineStage::None,
+            spec: None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };
@@ -793,5 +849,38 @@ mod tests {
         let summary = store.get_decision_summary(session_id).unwrap();
         assert_eq!(summary.len(), 2); // still 2, not 3
         assert_eq!(summary[0].answer, "Electron"); // updated
+    }
+}
+
+// ============ Pipeline: tickets tests ============
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+
+    #[test]
+    fn parse_tickets_response_in_tag() {
+        let text = r#"一些前缀说明
+<tickets>{"tickets":[{"key":"t1","title":"地图数据模型","description":"实现地图配置结构","depends_on":[]},{"key":"t2","title":"地图渲染","description":"按数据渲染地图","depends_on":["t1"]}]}</tickets>
+"#;
+        let ts = grill_me_v2_lib::llm::prompt::parse_tickets_response(text);
+        assert_eq!(ts.len(), 2);
+        assert_eq!(ts[0].title.as_deref(), Some("地图数据模型"));
+        assert_eq!(ts[1].depends_on.as_deref(), Some(&["t1".to_string()][..]));
+    }
+
+    #[test]
+    fn parse_tickets_response_raw_json_fallback() {
+        let text = r#"{"tickets":[{"key":"a","title":"X","depends_on":null}]}"#;
+        let ts = grill_me_v2_lib::llm::prompt::parse_tickets_response(text);
+        assert_eq!(ts.len(), 1);
+        assert_eq!(ts[0].key.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn parse_spec_response_extracts_tag() {
+        let text = "前面的话\n<spec>\n# 标题\n内容\n</spec>\n后面的话";
+        let spec = grill_me_v2_lib::llm::prompt::parse_spec_response(text);
+        assert_eq!(spec, "# 标题\n内容");
     }
 }
