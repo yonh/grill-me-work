@@ -124,7 +124,7 @@ export function InlineQuestionCard({ question }: InlineQuestionCardProps) {
       <Card className="opacity-60">
         <CardContent className="flex items-start gap-2 p-3">
           <SkipForward className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-          <p className="flex-1 text-sm text-muted-foreground leading-snug break-words">{question.question} (已跳过)</p>
+          <p className="min-w-0 flex-1 text-sm text-muted-foreground leading-snug break-words">{question.question} (已跳过)</p>
         </CardContent>
       </Card>
     );
@@ -145,7 +145,7 @@ export function InlineQuestionCard({ question }: InlineQuestionCardProps) {
               <p className="text-xs text-muted-foreground leading-snug break-words">{question.rationale}</p>
             )}
             {nodeTitle && (
-              <p className="text-[10px] text-primary/70">{nodeTitle}</p>
+              <p className="text-[10px] text-primary/70 break-all">{nodeTitle}</p>
             )}
           </div>
           <Badge variant="outline" className="mt-0.5 shrink-0 text-[10px]">
@@ -169,20 +169,20 @@ export function InlineQuestionCard({ question }: InlineQuestionCardProps) {
           >
             <ChevronDown className="h-4 w-4" />
           </button>
-          <div className="flex-1 space-y-1">
-            <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
               <Badge variant="outline" className="text-[10px]">
                 {question.q_type === "choice" ? "单选" : question.q_type === "multi" ? "多选" : "文本"}
               </Badge>
               {nodeTitle && (
-                <Badge variant="secondary" className="text-[10px]">
-                  {nodeTitle}
+                <Badge variant="secondary" className="min-w-0 max-w-full text-[10px]">
+                  <span className="break-all">{nodeTitle}</span>
                 </Badge>
               )}
             </div>
-            <p className="text-sm font-semibold leading-snug">{question.question}</p>
+            <p className="text-sm font-semibold leading-snug break-words">{question.question}</p>
             {question.rationale && (
-              <p className="text-xs text-muted-foreground">{question.rationale}</p>
+              <p className="text-xs text-muted-foreground break-words">{question.rationale}</p>
             )}
           </div>
         </div>
@@ -204,8 +204,8 @@ export function InlineQuestionCard({ question }: InlineQuestionCardProps) {
                 onClick={() => handleChoice(opt.label)}
               >
                 <RadioGroupItem value={opt.label} className="mt-1" id={`inline-${question.id}-${opt.label}`} />
-                <div className="flex-1 space-y-0.5">
-                  <Label htmlFor={`inline-${question.id}-${opt.label}`} className="cursor-pointer text-sm font-medium">
+                <div className="min-w-0 flex-1 space-y-0.5 break-words">
+                  <Label htmlFor={`inline-${question.id}-${opt.label}`} className="cursor-pointer text-sm font-medium leading-snug">
                     {opt.label}
                   </Label>
                   {opt.description && (
@@ -246,8 +246,8 @@ export function InlineQuestionCard({ question }: InlineQuestionCardProps) {
                     }}
                     className="mt-1"
                   />
-                  <div className="flex-1 space-y-0.5">
-                    <Label htmlFor={`inline-${question.id}-${opt.label}`} className="cursor-pointer text-sm font-medium">
+                  <div className="min-w-0 flex-1 space-y-0.5 break-words">
+                    <Label htmlFor={`inline-${question.id}-${opt.label}`} className="cursor-pointer text-sm font-medium leading-snug">
                       {opt.label}
                     </Label>
                     {opt.description && (
