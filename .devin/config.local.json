@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Exec(git show)",
+      "Exec(ls)",
+      "Exec(grep)",
+      "Exec(git diff)",
+      "Exec(git status)",
+      "Exec(sed)",
+      "Exec(cat)",
+      "Exec(head)",
+      "Exec(git add)",
+      "Exec(git commit)",
+      "Exec(git log)",
+      "Exec(find)"
+    ]
+  }
+}
