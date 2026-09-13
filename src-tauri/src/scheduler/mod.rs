@@ -3536,10 +3536,13 @@ fn spawn_spec_generation(
             round_context(&*store, &sid).as_deref(),
         );
 
+        crate::agent::push_app_log("spec", &format!("llm call start: {}", sid));
         match client.generate_summary(&sysp, &userp).await {
             Ok(text) => {
+                crate::agent::push_app_log("spec", &format!("llm done: {} ({} chars)", sid, text.len()));
                 let spec = prompt::parse_spec_response(&text);
                 if spec.is_empty() {
+                    crate::agent::push_app_log("spec", &format!("parse empty: {}", sid));
                     let _ = app.emit(
                         EVENT_ERROR,
                         ErrorPayload {
@@ -3565,6 +3568,7 @@ fn spawn_spec_generation(
                 }
             }
             Err(e) => {
+                crate::agent::push_app_log("spec", &format!("llm failed: {} — {}", sid, e));
                 let _ = app.emit(
                     EVENT_ERROR,
                     ErrorPayload {
