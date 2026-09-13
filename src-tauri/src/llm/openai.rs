@@ -564,13 +564,16 @@ impl QuestionSource for OpenAIClient {
                     },
                 ],
                 temperature: client.temperature,
-                stream: false,
+                // Streaming keeps the gateway sending bytes while the model
+                // reasons — a non-stream request idles >120s and some gateways
+                // (e.g. smai) answer with 524. SSE deltas keep it alive.
+                stream: true,
                 tools: None,
                 tool_choice: None,
             };
 
             let http_client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(180))
+                .timeout(std::time::Duration::from_secs(300))
                 .build()?;
 
             let response = http_client
@@ -592,14 +595,34 @@ impl QuestionSource for OpenAIClient {
                 return Err(LlmError::Server(format!("{}: {}", status, body)));
             }
 
-            let resp: ChatNonStreamResponse = response.json().await?;
-            let content = resp
-                .choices
-                .first()
-                .map(|c| c.message.content.clone())
-                .unwrap_or_default();
-
-            Ok(content)
+            let mut stream = response.bytes_stream();
+            let mut sse_buffer = String::new();
+            let mut full_text = String::new();
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = chunk_result?;
+                sse_buffer.push_str(&String::from_utf8_lossy(&chunk));
+                let parts: Vec<String> = sse_buffer.split('\n').map(|s| s.to_string()).collect();
+                let n = parts.len();
+                sse_buffer = parts[n - 1].clone();
+                for line in &parts[..n.saturating_sub(1)] {
+                    let line = line.trim();
+                    let data = line
+                        .strip_prefix("data: ")
+                        .or_else(|| line.strip_prefix("data:"));
+                    let Some(data) = data else { continue };
+                    if data.trim() == "[DONE]" {
+                        continue;
+                    }
+                    if let Ok(chunk_data) = serde_json::from_str::<ChatStreamChunk>(data) {
+                        if let Some(choice) = chunk_data.choices.first() {
+                            if let Some(content) = &choice.delta.content {
+                                full_text.push_str(content);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(full_text)
         })
     }
 }
