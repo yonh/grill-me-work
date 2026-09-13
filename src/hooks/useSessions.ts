@@ -16,6 +16,7 @@ export function useSessions() {
     setGenerating,
     setOutline,
     setPipeline,
+    setRounds,
   } = useSessionStore();
 
   const loadQuestions = useCallback(
@@ -35,12 +36,18 @@ export function useSessions() {
       }
       try {
         const p = await api.getPipeline(id);
-        setPipeline(p.stage, p.spec ?? null, p.tickets);
+        setPipeline(p.stage, p.spec ?? null, p.tickets, p.round, p.running);
+      } catch (err) {
+        console.error(err);
+      }
+      try {
+        const rounds = await api.listRounds(id);
+        setRounds(rounds, useSessionStore.getState().currentRound?.id);
       } catch (err) {
         console.error(err);
       }
     },
-    [setQuestions, setOutline, setPipeline]
+    [setQuestions, setOutline, setPipeline, setRounds]
   );
 
   // Load sessions + restore backend "active session" so UI and MCP stay aligned.

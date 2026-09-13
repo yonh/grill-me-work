@@ -77,6 +77,36 @@ export interface PipelineInfo {
   stage: PipelineStage;
   spec?: string | null;
   tickets: Ticket[];
+  running?: string[];
+  /** Active development round; null between rounds (after archive). */
+  round?: Round | null;
+}
+
+// --- Development rounds (开发循环) ---
+
+export type RoundStatus = "active" | "archived";
+
+export interface Round {
+  id: string;
+  session_id: string;
+  number: number;
+  title: string;
+  goal?: string | null;
+  status: RoundStatus;
+  pipeline_stage: PipelineStage;
+  spec?: string | null;
+  summary?: string | null;
+  created_at: string;
+  archived_at?: string | null;
+}
+
+export interface RoundArchive {
+  round: Round;
+  nodes: OutlineNode[];
+  questions: Question[];
+  tickets: Ticket[];
+  messages: ChatMessage[];
+  decisions: DecisionEntry[];
 }
 
 export interface Session {
@@ -90,6 +120,7 @@ export interface Session {
   outline_status: OutlineStatus;
   pipeline_stage: PipelineStage;
   spec?: string | null;
+  current_round_id?: string | null;
   created_at: string;
   updated_at: string;
 }

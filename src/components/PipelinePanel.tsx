@@ -10,6 +10,9 @@ import {
   FileText,
   GitBranch,
   Sparkles,
+  Archive,
+  History,
+  Play,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -34,15 +37,23 @@ const TICKET_STATUS_LABEL: Record<string, string> = {
   rejected: "已废弃",
 };
 
-/** Staged pipeline: interview → spec → tickets → branch-map development. */
+/** Staged pipeline: interview → spec → tickets → branch-map development,
+ *  framed inside a development round (一轮开发循环) that can be archived. */
 export function PipelinePanel() {
-  const { pipelineStage, spec, tickets, currentSessionId } = useSessionStore();
+  const { pipelineStage, spec, tickets, currentSessionId, rounds, currentRound } =
+    useSessionStore();
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [specDraft, setSpecDraft] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState("");
+  const [roundTitle, setRoundTitle] = useState("");
+  const [roundGoal, setRoundGoal] = useState("");
+  const [showHistory, setShowHistory] = useState(false);
 
-  if (pipelineStage === "none") return null; // legacy free-mode session
+  // Between rounds (or legacy session): show round controls only.
+  const betweenRounds = rounds.length > 0 && !currentRound;
+  if (pipelineStage === "none" && !betweenRounds && rounds.length === 0)
+    return null; // legacy free-mode session
 
   const stageIdx = STAGES.findIndex((s) => s.key === pipelineStage);
   const isSpecDraft = pipelineStage === "spec_draft";
@@ -100,7 +111,7 @@ export function PipelinePanel() {
   return (
     <Card className="border-primary/20">
       <CardContent className="p-3">
-        {/* Stage stepper */}
+        {/* Stage stepper + round badge */}
         <button
           className="flex w-full items-center justify-between"
           onClick={() => setExpanded((v) => !v)}
@@ -108,6 +119,16 @@ export function PipelinePanel() {
           <div className="flex items-center gap-2 text-sm font-medium">
             <ListChecks className="h-4 w-4 text-primary" />
             开发流水线
+            {currentRound && (
+              <Badge variant="secondary" className="text-[10px] px-1.5">
+                第{currentRound.number}轮 · {currentRound.title}
+              </Badge>
+            )}
+            {!currentRound && rounds.length > 0 && (
+              <Badge variant="outline" className="text-[10px] px-1.5">
+                待开新轮
+              </Badge>
+            )}
             <div className="flex items-center gap-1">
               {STAGES.map((s, i) => (
                 <span key={s.key} className="flex items-center gap-1">
@@ -133,6 +154,153 @@ export function PipelinePanel() {
 
         {!expanded ? null : (
           <div className="mt-3 space-y-3 border-t pt-3">
+            {/* round lifecycle bar */}
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                {currentRound ? (
+                  <>
+                    <span className="font-medium text-foreground">
+                      第{currentRound.number}轮
+                    </span>
+                    <span className="truncate">{currentRound.title}</span>
+                  </>
+                ) : (
+                  <span>当前无进行中的轮次</span>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5">
+                {currentRound && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-6 text-[11px]"
+                    disabled={busy || !currentSessionId}
+                    onClick={() => {
+                      if (
+                        !window.confirm(
+                          `归档第 ${currentRound.number} 轮「${currentRound.title}」？\n问答/大纲/spec/tickets 将快照到 archives/ 并移出工作区。`
+                        )
+                      )
+                        return;
+                      void run(
+                        () => api.archiveRound(currentSessionId!),
+                        "本轮已归档"
+                      );
+                    }}
+                  >
+                    <Archive className="mr-1 h-3 w-3" />
+                    归档本轮
+                  </Button>
+                )}
+                {rounds.some((r) => r.status === "archived") && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 text-[11px]"
+                    onClick={() => setShowHistory((v) => !v)}
+                  >
+                    <History className="mr-1 h-3 w-3" />
+                    历史
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {/* no active round → start-new-round form */}
+            {!currentRound && (
+              <div className="space-y-1.5 rounded-md border border-dashed p-2">
+                <p className="text-[11px] text-muted-foreground">
+                  开始新一轮开发循环（访谈 → spec → tickets → 分支地图 → 归档）
+                </p>
+                <Input
+                  className="h-7 text-xs"
+                  placeholder="本轮任务名，如：动作效果"
+                  value={roundTitle}
+                  onChange={(e) => setRoundTitle(e.target.value)}
+                />
+                <Input
+                  className="h-7 text-xs"
+                  placeholder="本轮方向（可选，注入访谈大纲）"
+                  value={roundGoal}
+                  onChange={(e) => setRoundGoal(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && roundTitle.trim()) {
+                      void run(
+                        () =>
+                          api.startRound(
+                            currentSessionId!,
+                            roundTitle.trim(),
+                            roundGoal.trim() || undefined
+                          ),
+                        `第 ${rounds.length + 1} 轮已开启`
+                      ).then(() => {
+                        setRoundTitle("");
+                        setRoundGoal("");
+                      });
+                    }
+                  }}
+                />
+                <Button
+                  size="sm"
+                  className="h-6 text-[11px]"
+                  disabled={busy || !currentSessionId || !roundTitle.trim()}
+                  onClick={() =>
+                    void run(
+                      () =>
+                        api.startRound(
+                          currentSessionId!,
+                          roundTitle.trim(),
+                          roundGoal.trim() || undefined
+                        ),
+                      "新一轮已开启，生成访谈大纲…"
+                    ).then(() => {
+                      setRoundTitle("");
+                      setRoundGoal("");
+                    })
+                  }
+                >
+                  <Play className="mr-1 h-3 w-3" />
+                  开始第 {rounds.length + 1} 轮
+                </Button>
+              </div>
+            )}
+
+            {/* archived rounds history */}
+            {showHistory && (
+              <div className="space-y-1.5">
+                {rounds
+                  .filter((r) => r.status === "archived")
+                  .map((r) => (
+                    <div key={r.id} className="rounded-md border p-2 text-xs">
+                      <div className="flex items-center gap-2">
+                        <Badge variant="outline" className="text-[10px]">
+                          第{r.number}轮
+                        </Badge>
+                        <span className="font-medium">{r.title}</span>
+                        <span className="ml-auto text-[10px] text-muted-foreground">
+                          {r.archived_at?.slice(0, 10)}
+                        </span>
+                      </div>
+                      {r.summary && (
+                        <p className="mt-1 text-[10px] text-muted-foreground">
+                          {r.summary}
+                        </p>
+                      )}
+                      {r.spec && (
+                        <details className="mt-1">
+                          <summary className="cursor-pointer text-[10px] text-muted-foreground">
+                            spec 快照
+                          </summary>
+                          <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-muted/50 p-1.5 text-[10px]">
+                            {r.spec}
+                          </pre>
+                        </details>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            )}
+
             {/* interviewing → generate spec */}
             {pipelineStage === "interviewing" && (
               <div className="flex items-center justify-between gap-2">

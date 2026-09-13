@@ -9,6 +9,8 @@ import {
   onInterviewMayComplete,
   onOutlineUpdated,
   onPipelineUpdated,
+  onRoundStarted,
+  onRoundArchived,
   onChatStream,
   onChatMessageDone,
   onPrototypeStatus,
@@ -126,7 +128,13 @@ export function useSessionEvents(
         if (currentSessionIdRef.current === payload.session_id) {
           useSessionStore
             .getState()
-            .setPipeline(payload.stage, payload.spec ?? null, payload.tickets);
+            .setPipeline(
+              payload.stage,
+              payload.spec ?? null,
+              payload.tickets,
+              payload.round,
+              payload.running
+            );
         }
       });
       if (cancelled) { u6c(); return; }
@@ -155,6 +163,46 @@ export function useSessionEvents(
       });
       if (cancelled) { u9(); return; }
       unsubs.push(u9);
+
+      const reloadAfterRoundChange = async (sessionId: string) => {
+        if (currentSessionIdRef.current !== sessionId) return;
+        try {
+          const st = useSessionStore.getState();
+          const [qs, outline, p, rounds] = await Promise.all([
+            api.getQuestions(sessionId),
+            api.getOutline(sessionId),
+            api.getPipeline(sessionId),
+            api.listRounds(sessionId),
+          ]);
+          st.setQuestions(qs);
+          st.setOutline(outline.status, outline.nodes);
+          st.setPipeline(p.stage, p.spec ?? null, p.tickets, p.round, p.running);
+          st.setRounds(rounds, p.round?.id);
+          // Session row changed (current_round_id) — refresh sidebar entry.
+          const session = await api.getSession(sessionId);
+          if (session) {
+            useSessionStore.setState((prev) => ({
+              sessions: prev.sessions.map((s) => (s.id === sessionId ? session : s)),
+            }));
+          }
+        } catch (e) {
+          console.error("reload after round change", e);
+        }
+      };
+
+      const u9a = await onRoundStarted(async ({ session_id, round }) => {
+        toast.success(`第 ${round.number} 轮已开启：${round.title}`);
+        await reloadAfterRoundChange(session_id);
+      });
+      if (cancelled) { u9a(); return; }
+      unsubs.push(u9a);
+
+      const u9b = await onRoundArchived(async ({ session_id, round }) => {
+        toast.info(`第 ${round.number} 轮「${round.title}」已归档`);
+        await reloadAfterRoundChange(session_id);
+      });
+      if (cancelled) { u9b(); return; }
+      unsubs.push(u9b);
 
       const u10 = await onPrototypeUpdated((payload) => {
         bumpSessionPrototypeVersion(payload.session_id, payload.version);

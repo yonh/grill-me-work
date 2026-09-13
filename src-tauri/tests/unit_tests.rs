@@ -239,6 +239,7 @@ mod tests {
         settings: Mutex<HashMap<String, String>>,
         next_batch_no: Mutex<i32>,
         tickets: Mutex<HashMap<String, Ticket>>,
+        rounds: Mutex<HashMap<String, Round>>,
     }
 
     impl MockStore {
@@ -261,6 +262,7 @@ mod tests {
                 settings: Mutex::new(settings),
                 next_batch_no: Mutex::new(0),
                 tickets: Mutex::new(HashMap::new()),
+                rounds: Mutex::new(HashMap::new()),
             }
         }
 
@@ -512,6 +514,72 @@ mod tests {
             }
             Ok(())
         }
+
+        fn create_round(&self, round: &Round) -> Result<()> {
+            self.rounds
+                .lock()
+                .unwrap()
+                .insert(round.id.clone(), round.clone());
+            Ok(())
+        }
+
+        fn update_round(&self, round: &Round) -> Result<()> {
+            self.rounds
+                .lock()
+                .unwrap()
+                .insert(round.id.clone(), round.clone());
+            Ok(())
+        }
+
+        fn get_rounds(&self, session_id: &str) -> Result<Vec<Round>> {
+            Ok(self
+                .rounds
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|r| r.session_id == session_id)
+                .cloned()
+                .collect())
+        }
+
+        fn get_round(&self, round_id: &str) -> Result<Option<Round>> {
+            Ok(self.rounds.lock().unwrap().get(round_id).cloned())
+        }
+
+        fn get_current_round(&self, session_id: &str) -> Result<Option<Round>> {
+            let cur = self
+                .sessions
+                .lock()
+                .unwrap()
+                .get(session_id)
+                .and_then(|s| s.current_round_id.clone());
+            Ok(cur.and_then(|rid| self.rounds.lock().unwrap().get(&rid).cloned()))
+        }
+
+        fn set_current_round(&self, session_id: &str, round_id: Option<&str>) -> Result<()> {
+            if let Some(s) = self.sessions.lock().unwrap().get_mut(session_id) {
+                s.current_round_id = round_id.map(|r| r.to_string());
+            }
+            Ok(())
+        }
+
+        fn get_round_archive(&self, round_id: &str) -> Result<RoundArchive> {
+            let round = self
+                .rounds
+                .lock()
+                .unwrap()
+                .get(round_id)
+                .cloned()
+                .ok_or_else(|| StoreError::NotFound(round_id.to_string()))?;
+            Ok(RoundArchive {
+                round,
+                nodes: vec![],
+                questions: vec![],
+                tickets: vec![],
+                messages: vec![],
+                decisions: vec![],
+            })
+        }
     }
 
     // ============ Stale marking / dependency graph tests ============
@@ -645,6 +713,7 @@ mod tests {
             outline_status: OutlineStatus::None,
             pipeline_stage: PipelineStage::None,
             spec: None,
+            current_round_id: None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };
@@ -696,6 +765,7 @@ mod tests {
             outline_status: OutlineStatus::None,
             pipeline_stage: PipelineStage::None,
             spec: None,
+            current_round_id: None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };
@@ -742,6 +812,7 @@ mod tests {
             outline_status: OutlineStatus::None,
             pipeline_stage: PipelineStage::None,
             spec: None,
+            current_round_id: None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };
@@ -775,6 +846,7 @@ mod tests {
             outline_status: OutlineStatus::None,
             pipeline_stage: PipelineStage::None,
             spec: None,
+            current_round_id: None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };

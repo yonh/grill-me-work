@@ -79,4 +79,14 @@ pub trait Store: Send + Sync + 'static {
     fn set_ticket_status(&self, ticket_id: &str, status: TicketStatus) -> Result<()>;
     /// Record a git branch created for this ticket (gacha line).
     fn add_ticket_branch(&self, ticket_id: &str, branch: &str) -> Result<()>;
+    // Development rounds (开发循环)
+    fn create_round(&self, round: &Round) -> Result<()>;
+    /// Update mutable round fields (status / snapshots / archived_at).
+    fn update_round(&self, round: &Round) -> Result<()>;
+    fn get_rounds(&self, session_id: &str) -> Result<Vec<Round>>;
+    fn get_round(&self, round_id: &str) -> Result<Option<Round>>;
+    fn get_current_round(&self, session_id: &str) -> Result<Option<Round>>;
+    fn set_current_round(&self, session_id: &str, round_id: Option<&str>) -> Result<()>;
+    /// Aggregate read of one specific round (history/archive view).
+    fn get_round_archive(&self, round_id: &str) -> Result<RoundArchive>;
 }

@@ -269,6 +269,34 @@ pub enum SchedulerMsg {
         ticket_id: String,
         app_handle: AppHandle,
     },
+    // --- Development rounds (开发循环) ---
+    /// Start a new round: creates it, makes it current, resets pipeline to
+    /// interviewing and kicks off outline generation.
+    StartRound {
+        session_id: String,
+        title: String,
+        goal: Option<String>,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<Round, String>>,
+    },
+    /// Archive the current round: snapshot its data + docs to
+    /// `archives/round-<N>/`, mark it archived, and detach it from the working
+    /// area (current_round_id becomes NULL until the next start_round).
+    ArchiveRound {
+        session_id: String,
+        force: bool,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<Round, String>>,
+    },
+    ListRounds {
+        session_id: String,
+        reply: oneshot::Sender<Result<Vec<Round>, String>>,
+    },
+    /// Full data of one round (incl. archived) for history view / snapshot.
+    GetRoundArchive {
+        round_id: String,
+        reply: oneshot::Sender<Result<RoundArchive, String>>,
+    },
 }
 
 /// Per-session scheduler state.
@@ -305,6 +333,9 @@ pub struct PipelineInfo {
     /// Ticket ids with a dev line currently running.
     #[serde(default)]
     pub running: Vec<String>,
+    /// The active development round; None between rounds.
+    #[serde(default)]
+    pub round: Option<Round>,
 }
 
 /// The scheduler actor's shared state.
@@ -511,6 +542,10 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                             && s.pipeline_stage != PipelineStage::Developing
                     })
                     .unwrap_or(false);
+                if let Err(e) = require_active_round(&*store, &session_id) {
+                    let _ = reply.send(Err(e));
+                    continue;
+                }
                 if gated {
                     let _ = reply.send(Err(
                         "流水线未进入开发阶段：请先确认 spec 并确认 tickets".to_string()
@@ -688,6 +723,10 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                 reply,
             } => {
                 log::info!("[scheduler] GenerateOutline: session={}", session_id);
+                if let Err(e) = require_active_round(&*store, &session_id) {
+                    let _ = reply.send(Err(e));
+                    continue;
+                }
                 // Skip only while a task is actually in flight (in-memory flag —
                 // a stale 'generating' status after restart stays retryable).
                 let in_flight = state.get_or_create(&session_id).outline_generating;
@@ -960,6 +999,10 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                 reply,
             } => {
                 log::info!("[scheduler] GenerateSpec: session={}", session_id);
+                if let Err(e) = require_active_round(&*store, &session_id) {
+                    let _ = reply.send(Err(e));
+                    continue;
+                }
                 if state.get_or_create(&session_id).spec_generating {
                     let _ = reply.send(Err("spec 生成中，请稍候".to_string()));
                     continue;
@@ -1039,6 +1082,10 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                 reply,
             } => {
                 log::info!("[scheduler] GenerateTickets: session={}", session_id);
+                if let Err(e) = require_active_round(&*store, &session_id) {
+                    let _ = reply.send(Err(e));
+                    continue;
+                }
                 if state.get_or_create(&session_id).tickets_generating {
                     let _ = reply.send(Err("tickets 生成中，请稍候".to_string()));
                     continue;
@@ -1140,6 +1187,10 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                 app_handle,
                 reply,
             } => {
+                if let Err(e) = require_active_round(&*store, &session_id) {
+                    let _ = reply.send(Err(e));
+                    continue;
+                }
                 let result = launch_ticket_run(
                     store.clone(),
                     &mut state,
@@ -1173,6 +1224,49 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                     s.running_tickets.remove(&ticket_id);
                 }
                 emit_pipeline_updated(&*store, &session_id, &app_handle, running_of(&state, &session_id));
+            }
+            SchedulerMsg::StartRound {
+                session_id,
+                title,
+                goal,
+                app_handle,
+                reply,
+            } => {
+                log::info!("[scheduler] StartRound: session={}, title={}", session_id, title);
+                let result = handle_start_round(
+                    store.clone(),
+                    &mut state,
+                    &session_id,
+                    &title,
+                    goal,
+                    &app_handle,
+                    tx.clone(),
+                );
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::ArchiveRound {
+                session_id,
+                force,
+                app_handle,
+                reply,
+            } => {
+                log::info!("[scheduler] ArchiveRound: session={}, force={}", session_id, force);
+                let result = handle_archive_round(
+                    store.clone(),
+                    &mut state,
+                    &session_id,
+                    force,
+                    &app_handle,
+                );
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::ListRounds { session_id, reply } => {
+                let result = store.get_rounds(&session_id).map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::GetRoundArchive { round_id, reply } => {
+                let result = store.get_round_archive(&round_id).map_err(|e| e.to_string());
+                let _ = reply.send(result);
             }
         }
     }
@@ -1229,6 +1323,10 @@ fn msg_name(msg: &SchedulerMsg) -> &'static str {
         SchedulerMsg::SpecDone { .. } => "SpecDone",
         SchedulerMsg::TicketsDone { .. } => "TicketsDone",
         SchedulerMsg::TicketRunDone { .. } => "TicketRunDone",
+        SchedulerMsg::StartRound { .. } => "StartRound",
+        SchedulerMsg::ArchiveRound { .. } => "ArchiveRound",
+        SchedulerMsg::ListRounds { .. } => "ListRounds",
+        SchedulerMsg::GetRoundArchive { .. } => "GetRoundArchive",
     }
 }
 
@@ -1250,11 +1348,30 @@ fn handle_create_session(
         outline_status: OutlineStatus::None,
         pipeline_stage: PipelineStage::Interviewing,
         spec: None,
+        current_round_id: None,
         created_at: now.clone(),
-        updated_at: now,
+        updated_at: now.clone(),
     };
     store
         .create_session(&session)
+        .map_err(|e| e.to_string())?;
+    // A session is a project — it starts with round 1 (the initial dev cycle).
+    let round = Round {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: session.id.clone(),
+        number: 1,
+        title: title.to_string(),
+        goal: session.initial_context.clone(),
+        status: RoundStatus::Active,
+        pipeline_stage: PipelineStage::Interviewing,
+        spec: None,
+        summary: None,
+        created_at: now.clone(),
+        archived_at: None,
+    };
+    store.create_round(&round).map_err(|e| e.to_string())?;
+    store
+        .set_current_round(&session.id, Some(&round.id))
         .map_err(|e| e.to_string())?;
     Ok(session)
 }
@@ -2461,6 +2578,10 @@ fn check_water_levels_and_trigger(
         Ok(Some(s)) => s,
         _ => return,
     };
+    if session.current_round_id.is_none() {
+        log::info!("[water] session={}: SKIP (no active round — between rounds)", session_id);
+        return;
+    }
     match session.outline_status {
         // Outline still generating or waiting for user confirmation — hold all batches.
         OutlineStatus::Generating | OutlineStatus::Draft => {
@@ -2990,7 +3111,10 @@ fn spawn_outline_generation(
             settings.temperature,
         );
         let system_prompt = prompt::build_outline_system_prompt(&session.role);
-        let user_prompt = prompt::build_outline_user_prompt(&session);
+        let user_prompt = prompt::build_outline_user_prompt(
+            &session,
+            round_context(&*store, &session_id).as_deref(),
+        );
         crate::agent::push_app_log("outline", &format!("llm call start: {}", session_id));
 
         match client.generate_summary(&system_prompt, &user_prompt).await {
@@ -3151,11 +3275,15 @@ fn build_pipeline_info(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("session {session_id} not found"))?;
     let tickets = store.get_tickets(session_id).map_err(|e| e.to_string())?;
+    let round = store
+        .get_current_round(session_id)
+        .map_err(|e| e.to_string())?;
     Ok(PipelineInfo {
         stage: session.pipeline_stage,
         spec: session.spec,
         tickets,
         running,
+        round,
     })
 }
 
@@ -3175,6 +3303,7 @@ fn emit_pipeline_updated(
                     "spec": info.spec,
                     "tickets": info.tickets,
                     "running": info.running,
+                    "round": info.round,
                 }),
             );
         }
@@ -3236,7 +3365,13 @@ fn spawn_spec_generation(
             settings.temperature,
         );
         let sysp = prompt::build_spec_system_prompt(&session.role);
-        let userp = prompt::build_spec_user_prompt(&session, &decisions, &nodes, &messages);
+        let userp = prompt::build_spec_user_prompt(
+            &session,
+            &decisions,
+            &nodes,
+            &messages,
+            round_context(&*store, &sid).as_deref(),
+        );
 
         match client.generate_summary(&sysp, &userp).await {
             Ok(text) => {
@@ -3532,4 +3667,249 @@ fn launch_ticket_run(
     });
 
     Ok(branch)
+}
+
+// ==================== Development rounds ====================
+
+/// Round gate: sessions that use rounds must have an *active* one; sessions
+/// with zero rounds (paranoid legacy) stay ungated.
+fn require_active_round(store: &dyn Store, session_id: &str) -> Result<(), String> {
+    let has_rounds = !store
+        .get_rounds(session_id)
+        .map_err(|e| e.to_string())?
+        .is_empty();
+    if has_rounds
+        && store
+            .get_current_round(session_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+    {
+        return Err("当前无进行中的开发轮次（上一轮已归档）——请先 start_round".to_string());
+    }
+    Ok(())
+}
+
+/// Compose the "round context" fed into outline/spec prompts: the current
+/// round's goal plus what earlier rounds already shipped (so the interview
+/// doesn't re-ask settled ground).
+fn round_context(store: &dyn Store, session_id: &str) -> Option<String> {
+    let rounds = store.get_rounds(session_id).ok()?;
+    let current = rounds.iter().find(|r| {
+        r.status == RoundStatus::Active
+            && store
+                .get_current_round(session_id)
+                .ok()
+                .flatten()
+                .map(|c| c.id == r.id)
+                .unwrap_or(false)
+    });
+    let prior: Vec<&Round> = rounds
+        .iter()
+        .filter(|r| r.status == RoundStatus::Archived)
+        .collect();
+    let mut ctx = String::new();
+    if let Some(r) = current {
+        if let Some(g) = &r.goal {
+            if !g.trim().is_empty() {
+                ctx.push_str(&format!("本轮开发目标（第{}轮「{}」）：{}\n", r.number, r.title, g));
+            }
+        }
+    }
+    if !prior.is_empty() {
+        ctx.push_str("\n已完成的开发轮次（既有成果，不要重复确认范围）：\n");
+        for r in prior {
+            let spec_head = r
+                .spec
+                .as_deref()
+                .map(|s| s.chars().take(200).collect::<String>())
+                .unwrap_or_default();
+            ctx.push_str(&format!(
+                "- 第{}轮「{}」{}{}\n",
+                r.number,
+                r.title,
+                if spec_head.is_empty() { "" } else { "： spec 摘要 " },
+                spec_head
+            ));
+        }
+    }
+    if ctx.trim().is_empty() { None } else { Some(ctx) }
+}
+
+fn handle_start_round(
+    store: Arc<dyn Store>,
+    state: &mut SchedulerState,
+    session_id: &str,
+    title: &str,
+    goal: Option<String>,
+    app_handle: &AppHandle,
+    tx: mpsc::Sender<SchedulerMsg>,
+) -> Result<Round, String> {
+    let session = store
+        .get_session(session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+    if store
+        .get_current_round(session_id)
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        return Err("已有进行中的轮次——请先归档当前轮再开新轮".to_string());
+    }
+    let number = store
+        .get_rounds(session_id)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|r| r.number)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let now = chrono::Utc::now().to_rfc3339();
+    let round = Round {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.to_string(),
+        number,
+        title: title.to_string(),
+        goal: goal.clone(),
+        status: RoundStatus::Active,
+        pipeline_stage: PipelineStage::Interviewing,
+        spec: None,
+        summary: None,
+        created_at: now,
+        archived_at: None,
+    };
+    store.create_round(&round).map_err(|e| e.to_string())?;
+    store
+        .set_current_round(session_id, Some(&round.id))
+        .map_err(|e| e.to_string())?;
+    // Reset live pipeline state for the new cycle.
+    store
+        .set_session_pipeline_stage(session_id, PipelineStage::Interviewing)
+        .map_err(|e| e.to_string())?;
+    store
+        .set_session_spec(session_id, None)
+        .map_err(|e| e.to_string())?;
+    store
+        .set_session_outline_status(session_id, OutlineStatus::None)
+        .map_err(|e| e.to_string())?;
+    state.sessions.remove(session_id);
+
+    // Refresh intent doc: project intent + this round's goal + shipped rounds.
+    let prior_titles: Vec<String> = store
+        .get_rounds(session_id)
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.status == RoundStatus::Archived)
+        .map(|r| format!("第{}轮「{}」", r.number, r.title))
+        .collect();
+    crate::workspace::write_round_intent(
+        session_id,
+        &session.title,
+        &session.role,
+        goal.as_deref(),
+        number,
+        &prior_titles,
+    )
+    .ok();
+
+    let _ = app_handle.emit(
+        "round_started",
+        serde_json::json!({ "session_id": session_id, "round": round }),
+    );
+    emit_pipeline_updated(&*store, session_id, app_handle, running_of(state, session_id));
+
+    // Kick off the round's interview outline.
+    state.get_or_create(session_id).outline_generating = true;
+    spawn_outline_generation(store.clone(), session_id, app_handle, tx);
+    Ok(round)
+}
+
+fn handle_archive_round(
+    store: Arc<dyn Store>,
+    state: &mut SchedulerState,
+    session_id: &str,
+    force: bool,
+    app_handle: &AppHandle,
+) -> Result<Round, String> {
+    let mut round = store
+        .get_current_round(session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "无进行中的轮次可归档".to_string())?;
+    let running = running_of(state, session_id);
+    if !running.is_empty() && !force {
+        return Err(format!(
+            "仍有运行中的开发线（{}）——完成/取消后再归档，或 force=true",
+            running.join(", ")
+        ));
+    }
+    let session = store
+        .get_session(session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+
+    // Collect the round's full data while it's still the current round.
+    let archive = store
+        .get_round_archive(&round.id)
+        .map_err(|e| e.to_string())?;
+
+    // Filesystem snapshot: archives/round-<NN>/{spec,decisions,summary}.md + *.json
+    if let Err(e) = crate::workspace::write_round_archive(session_id, &round, &archive) {
+        log::warn!("[round] archive files write failed: {e}");
+    }
+
+    // Snapshot live state into the round row, then detach.
+    round.status = RoundStatus::Archived;
+    round.archived_at = Some(chrono::Utc::now().to_rfc3339());
+    round.pipeline_stage = session.pipeline_stage;
+    round.spec = session.spec.clone();
+    round.summary = Some(format!(
+        "{} 题已答 / {} 题跳过 / {} tickets（{} done）/ {} 分支",
+        archive
+            .questions
+            .iter()
+            .filter(|q| q.status == QuestionStatus::Answered)
+            .count(),
+        archive
+            .questions
+            .iter()
+            .filter(|q| q.status == QuestionStatus::Skipped)
+            .count(),
+        archive.tickets.len(),
+        archive
+            .tickets
+            .iter()
+            .filter(|t| t.status == TicketStatus::Done)
+            .count(),
+        archive
+            .tickets
+            .iter()
+            .map(|t| t.branches.len())
+            .sum::<usize>(),
+    ));
+    store.update_round(&round).map_err(|e| e.to_string())?;
+
+    store
+        .set_current_round(session_id, None)
+        .map_err(|e| e.to_string())?;
+    store
+        .set_session_pipeline_stage(session_id, PipelineStage::None)
+        .map_err(|e| e.to_string())?;
+    store
+        .set_session_spec(session_id, None)
+        .map_err(|e| e.to_string())?;
+    store
+        .set_session_outline_status(session_id, OutlineStatus::None)
+        .map_err(|e| e.to_string())?;
+    state.sessions.remove(session_id);
+
+    let _ = app_handle.emit(
+        "round_archived",
+        serde_json::json!({ "session_id": session_id, "round": round }),
+    );
+    emit_pipeline_updated(&*store, session_id, app_handle, running_of(state, session_id));
+    emit_outline_updated(&*store, session_id, app_handle);
+    crate::agent::push_app_log(
+        "round",
+        &format!("round {} archived: {} ({})", round.number, round.title, session_id),
+    );
+    Ok(round)
 }

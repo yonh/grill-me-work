@@ -18,9 +18,73 @@ pub struct Session {
     /// Pipeline stage gating development: none(legacy) | interviewing | spec_draft | tickets_draft | developing
     pub pipeline_stage: PipelineStage,
     /// Product spec markdown (draft or confirmed; mirrored to docs/spec.md on confirm).
+    /// This is the *live working state of the current round* — archived rounds
+    /// keep their own snapshot in `rounds.spec`.
     pub spec: Option<String>,
+    /// The active development round; NULL between rounds (after archive, before start).
+    pub current_round_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// One development cycle (轮次) inside a project: interview → spec → tickets →
+/// branch-map development → archive. All round-scoped rows (questions, outline
+/// nodes, tickets, messages, decisions, batches) carry `round_id` and are only
+/// visible while the round is the session's current round.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Round {
+    pub id: String,
+    pub session_id: String,
+    /// 1-based cycle number inside the project.
+    pub number: i32,
+    /// Task name, e.g. "首屏静态画面" / "动作效果".
+    pub title: String,
+    /// Direction for this round's interview — feeds the outline prompt.
+    pub goal: Option<String>,
+    pub status: RoundStatus,
+    /// Pipeline stage snapshot taken at archive time.
+    pub pipeline_stage: PipelineStage,
+    /// Spec snapshot taken at archive time.
+    pub spec: Option<String>,
+    /// LLM/heuristic summary snapshot taken at archive time.
+    pub summary: Option<String>,
+    pub created_at: String,
+    pub archived_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoundStatus {
+    Active,
+    /// Archived — data preserved but out of the working area.
+    Archived,
+}
+
+impl RoundStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RoundStatus::Active => "active",
+            RoundStatus::Archived => "archived",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "archived" => RoundStatus::Archived,
+            _ => RoundStatus::Active,
+        }
+    }
+}
+
+/// Full read of one round's data — used for archive snapshots / history view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoundArchive {
+    pub round: Round,
+    pub nodes: Vec<OutlineNode>,
+    pub questions: Vec<Question>,
+    pub tickets: Vec<Ticket>,
+    pub messages: Vec<ChatMessage>,
+    pub decisions: Vec<DecisionEntry>,
 }
 
 /// Session pipeline stage — the spec→tickets gate before development.

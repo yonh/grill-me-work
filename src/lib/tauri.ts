@@ -18,6 +18,8 @@ import type {
   OutlineNode,
   PipelineInfo,
   Ticket,
+  Round,
+  RoundArchive,
 } from "./types";
 
 export const api = {
@@ -131,6 +133,14 @@ export const api = {
       fromSha: opts?.fromSha ?? null,
       feedback: opts?.feedback ?? null,
     }),
+  // --- development rounds ---
+  startRound: (sessionId: string, title: string, goal?: string) =>
+    invoke<Round>("start_round", { sessionId, title, goal: goal ?? null }),
+  archiveRound: (sessionId: string, force?: boolean) =>
+    invoke<Round>("archive_round", { sessionId, force: force ?? null }),
+  listRounds: (sessionId: string) => invoke<Round[]>("list_rounds", { sessionId }),
+  getRoundArchive: (roundId: string) =>
+    invoke<RoundArchive>("get_round_archive", { roundId }),
 };
 
 export function onNewQuestion(cb: (q: Question) => void): Promise<UnlistenFn> {
@@ -311,6 +321,22 @@ export function onPipelineUpdated(
   return listen<PipelineInfo & { session_id: string }>("pipeline_updated", (e) => {
     cb(e.payload);
   });
+}
+
+export function onRoundStarted(
+  cb: (payload: { session_id: string; round: Round }) => void
+): Promise<UnlistenFn> {
+  return listen<{ session_id: string; round: Round }>("round_started", (e) =>
+    cb(e.payload)
+  );
+}
+
+export function onRoundArchived(
+  cb: (payload: { session_id: string; round: Round }) => void
+): Promise<UnlistenFn> {
+  return listen<{ session_id: string; round: Round }>("round_archived", (e) =>
+    cb(e.payload)
+  );
 }
 
 export function onSessionCreated(

@@ -337,6 +337,102 @@ pub fn write_intent_md(session_id: &str, title: &str, role: &str, context: Optio
     std::fs::write(path, md)
 }
 
+/// Rewrite `docs/intent.md` for a new development round — project intent plus
+/// this round's goal and what earlier rounds already shipped.
+pub fn write_round_intent(
+    session_id: &str,
+    title: &str,
+    role: &str,
+    goal: Option<&str>,
+    round_number: i32,
+    prior_rounds: &[String],
+) -> std::io::Result<()> {
+    ensure_workspace(session_id)?;
+    let docs = session_docs_dir(session_id);
+    let mut md = String::new();
+    md.push_str("# 产品意图\n\n");
+    md.push_str(&format!("做一个与「{title}」相关的可交互静态 HTML 原型。\n\n"));
+    md.push_str(&format!("目标用户视角：{role}\n"));
+    md.push_str(&format!("\n## 当前开发轮次：第 {round_number} 轮\n\n"));
+    if let Some(g) = goal {
+        if !g.trim().is_empty() {
+            md.push_str(&format!("本轮目标：{g}\n"));
+        }
+    }
+    if !prior_rounds.is_empty() {
+        md.push_str("\n已完成轮次（既有成果，在其基础上迭代，不要推翻）：\n");
+        for t in prior_rounds {
+            md.push_str(&format!("- {t}\n"));
+        }
+    }
+    md.push_str("\n详细决策见 `docs/decisions.md`。代码只改 `prototype/`。\n");
+    std::fs::write(docs.join("intent.md"), md)
+}
+
+/// Snapshot a round's data into `archives/round-<NN>/`: copies docs/, then
+/// dumps outline/questions/tickets/messages/decisions as JSON + a summary.
+pub fn write_round_archive(
+    session_id: &str,
+    round: &crate::model::Round,
+    archive: &crate::model::RoundArchive,
+) -> std::io::Result<PathBuf> {
+    ensure_workspace(session_id)?;
+    let dir = session_workspace_dir(session_id)
+        .join("archives")
+        .join(format!("round-{:02}", round.number));
+    std::fs::create_dir_all(&dir)?;
+
+    let docs = session_docs_dir(session_id);
+    if docs.exists() {
+        let dst = dir.join("docs");
+        let _ = copy_dir_recursive(&docs, &dst);
+    }
+    if let Some(spec) = &round.spec {
+        std::fs::write(dir.join("spec.md"), spec)?;
+    }
+    std::fs::write(
+        dir.join("outline.json"),
+        serde_json::to_string_pretty(&archive.nodes).unwrap_or_default(),
+    )?;
+    std::fs::write(
+        dir.join("questions.json"),
+        serde_json::to_string_pretty(&archive.questions).unwrap_or_default(),
+    )?;
+    std::fs::write(
+        dir.join("tickets.json"),
+        serde_json::to_string_pretty(&archive.tickets).unwrap_or_default(),
+    )?;
+    std::fs::write(
+        dir.join("messages.json"),
+        serde_json::to_string_pretty(&archive.messages).unwrap_or_default(),
+    )?;
+    std::fs::write(
+        dir.join("decisions.json"),
+        serde_json::to_string_pretty(&archive.decisions).unwrap_or_default(),
+    )?;
+
+    let mut md = String::new();
+    md.push_str(&format!(
+        "# 第 {} 轮归档：{}\n\n",
+        round.number, round.title
+    ));
+    if let Some(g) = &round.goal {
+        md.push_str(&format!("- 目标：{g}\n"));
+    }
+    md.push_str(&format!(
+        "- 归档时间：{}\n",
+        round.archived_at.as_deref().unwrap_or("-")
+    ));
+    md.push_str(&format!(
+        "- 统计：{} 问 / {} 决策 / {} tickets\n",
+        archive.questions.len(),
+        archive.decisions.len(),
+        archive.tickets.len()
+    ));
+    std::fs::write(dir.join("summary.md"), md)?;
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

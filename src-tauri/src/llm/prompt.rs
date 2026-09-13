@@ -226,12 +226,20 @@ JSON Schema:
 }
 
 /// Build the user prompt for interview outline generation.
-pub fn build_outline_user_prompt(session: &Session) -> String {
+/// `round_context` carries the current round's goal plus what earlier rounds
+/// shipped — the outline should target this round, not re-interview the past.
+pub fn build_outline_user_prompt(session: &Session, round_context: Option<&str>) -> String {
     let mut prompt = String::new();
     prompt.push_str(&format!("项目主题：{}\n", session.title));
     if let Some(ctx) = &session.initial_context {
         if !ctx.is_empty() {
-            prompt.push_str(&format!("用户提供的初始上下文：{}\n", ctx));
+            prompt.push_str(&format!("项目初始上下文：{}\n", ctx));
+        }
+    }
+    if let Some(rc) = round_context {
+        if !rc.trim().is_empty() {
+            prompt.push_str(&format!("\n{}\n", rc));
+            prompt.push_str("注意：大纲只覆盖本轮目标范围内仍需确认的点。\n");
         }
     }
     prompt.push_str("\n请生成访谈大纲。\n");
@@ -632,12 +640,19 @@ pub fn build_spec_user_prompt(
     decision_summary: &[DecisionEntry],
     outline_nodes: &[OutlineNode],
     messages: &[ChatMessage],
+    round_context: Option<&str>,
 ) -> String {
     let mut prompt = String::new();
     prompt.push_str(&format!("项目主题：{}\n", session.title));
     if let Some(ctx) = &session.initial_context {
         if !ctx.is_empty() {
             prompt.push_str(&format!("初始上下文：{}\n", ctx));
+        }
+    }
+    if let Some(rc) = round_context {
+        if !rc.trim().is_empty() {
+            prompt.push_str(&format!("\n{}\n", rc));
+            prompt.push_str("注意：spec 只覆盖本轮新增范围；既有成果视作已完成的基础设施。\n");
         }
     }
     if !outline_nodes.is_empty() {

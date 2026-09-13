@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Session, Question, Settings, OutlineNode, OutlineStatus, PipelineStage, Ticket } from "@/lib/types";
+import type { Session, Question, Settings, OutlineNode, OutlineStatus, PipelineStage, Ticket, Round } from "@/lib/types";
 
 interface SessionStore {
   sessions: Session[];
@@ -14,6 +14,9 @@ interface SessionStore {
   pipelineStage: PipelineStage;
   spec: string | null;
   tickets: Ticket[];
+  rounds: Round[];
+  currentRound: Round | null;
+  runningTickets: string[];
 
   setSessions: (sessions: Session[]) => void;
   setCurrentSession: (id: string | null) => void;
@@ -28,7 +31,14 @@ interface SessionStore {
   setGenerating: (generating: boolean) => void;
   setPrototypeGenerating: (generating: boolean) => void;
   setOutline: (status: OutlineStatus, nodes: OutlineNode[]) => void;
-  setPipeline: (stage: PipelineStage, spec: string | null, tickets: Ticket[]) => void;
+  setPipeline: (
+    stage: PipelineStage,
+    spec: string | null,
+    tickets: Ticket[],
+    round?: Round | null,
+    running?: string[]
+  ) => void;
+  setRounds: (rounds: Round[], currentRoundId?: string | null) => void;
   bumpSessionPrototypeVersion: (sessionId: string, version: number) => void;
 }
 
@@ -45,11 +55,14 @@ export const useSessionStore = create<SessionStore>((set) => ({
   pipelineStage: "none",
   spec: null,
   tickets: [],
+  rounds: [],
+  currentRound: null,
+  runningTickets: [],
 
   setSessions: (sessions) => set({ sessions }),
 
   setCurrentSession: (id) =>
-    set({ currentSessionId: id, questions: [], outlineStatus: "none", outlineNodes: [], pipelineStage: "none", spec: null, tickets: [] }),
+    set({ currentSessionId: id, questions: [], outlineStatus: "none", outlineNodes: [], pipelineStage: "none", spec: null, tickets: [], rounds: [], currentRound: null, runningTickets: [] }),
 
   addSession: (session) =>
     set((state) => ({ sessions: [session, ...state.sessions] })),
@@ -97,7 +110,23 @@ export const useSessionStore = create<SessionStore>((set) => ({
 
   setOutline: (outlineStatus, outlineNodes) => set({ outlineStatus, outlineNodes }),
 
-  setPipeline: (pipelineStage, spec, tickets) => set({ pipelineStage, spec, tickets }),
+  setPipeline: (pipelineStage, spec, tickets, round, running) =>
+    set((state) => ({
+      pipelineStage,
+      spec,
+      tickets,
+      currentRound: round === undefined ? state.currentRound : round,
+      runningTickets: running ?? state.runningTickets,
+    })),
+
+  setRounds: (rounds, currentRoundId) =>
+    set((state) => {
+      const current =
+        rounds.find((r) => r.id === currentRoundId) ??
+        rounds.find((r) => r.status === "active") ??
+        null;
+      return { rounds, currentRound: current ?? state.currentRound };
+    }),
 
   bumpSessionPrototypeVersion: (sessionId, version) =>
     set((state) => ({

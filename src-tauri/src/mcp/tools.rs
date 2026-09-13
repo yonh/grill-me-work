@@ -84,6 +84,11 @@ pub fn tool_names() -> Vec<&'static str> {
         "confirm_tickets",
         "set_ticket_status",
         "run_ticket",
+        // --- development rounds ---
+        "start_round",
+        "archive_round",
+        "list_rounds",
+        "get_round_archive",
     ]
 }
 
@@ -439,6 +444,54 @@ pub fn tool_definitions() -> Vec<Value> {
                 "additionalProperties": false
             }),
         }),
+        // --- development rounds (一轮 = 一次完整开发循环) ---
+        json!({
+            "name": "start_round",
+            "description": "开启新一轮开发循环：创建轮次并设为当前轮，流水线重置为 interviewing 并自动生成访谈大纲。前置：无进行中轮次（上一轮需先 archive_round）。之后照旧走 outline→问答→spec→tickets→run_ticket 流程。",
+            "inputSchema": json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "title": { "type": "string", "description": "本轮任务名，如「动作效果」「完整关卡」" },
+                    "goal": { "type": "string", "description": "本轮方向描述，注入访谈大纲 prompt" }
+                },
+                "required": ["session_id", "title"],
+                "additionalProperties": false
+            }),
+        }),
+        json!({
+            "name": "archive_round",
+            "description": "收尾当前轮：把本轮的问答/大纲/spec/tickets/消息快照到工作区 archives/round-<N>/，标记归档，数据退出工作区（新轮次不再看到这些数据）。有运行中的开发线时拒绝（force=true 可强制）。归档后项目回到「待开新轮」状态。",
+            "inputSchema": json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "force": { "type": "boolean", "description": "有运行中的开发线也强制归档" }
+                },
+                "required": ["session_id"],
+                "additionalProperties": false
+            }),
+        }),
+        json!({
+            "name": "list_rounds",
+            "description": "列出项目的全部开发轮次（含已归档）：number/title/goal/status/spec 快照/归档时间/统计摘要。",
+            "inputSchema": json!({
+                "type": "object",
+                "properties": { "session_id": { "type": "string" } },
+                "required": ["session_id"],
+                "additionalProperties": false
+            }),
+        }),
+        json!({
+            "name": "get_round_archive",
+            "description": "读取某一轮的完整归档数据（大纲/问答/tickets/消息/决策），用于复盘历史轮次。",
+            "inputSchema": json!({
+                "type": "object",
+                "properties": { "round_id": { "type": "string" } },
+                "required": ["round_id"],
+                "additionalProperties": false
+            }),
+        }),
     ]
 }
 
@@ -483,6 +536,10 @@ pub fn call_tool(ctx: &McpContext, name: &str, args: &Value) -> Result<Value, St
         "confirm_tickets" => confirm_tickets(ctx, args),
         "set_ticket_status" => set_ticket_status(ctx, args),
         "run_ticket" => run_ticket(ctx, args),
+        "start_round" => start_round(ctx, args),
+        "archive_round" => archive_round(ctx, args),
+        "list_rounds" => list_rounds(ctx, args),
+        "get_round_archive" => get_round_archive(ctx, args),
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -685,14 +742,22 @@ fn get_session_state(ctx: &McpContext, args: &Value) -> Result<Value, String> {
         })
         .collect();
 
+    let round = ctx
+        .store
+        .get_current_round(&id)
+        .ok()
+        .flatten();
+    let round_count = ctx.store.get_rounds(&id).map(|rs| rs.len()).unwrap_or(0);
     Ok(json!({
         "session": session_row(&session, active_session::get_active_id(ctx.store.as_ref()).as_deref()),
+        "round": round,
+        "round_count": round_count,
         "outline": {
             "status": session.outline_status.as_str(),
             "nodes": node_rows,
         },
         "question_counts": counts,
-        "hint": "draft → save_outline/confirm_outline；confirmed → answer/skip ready 题；全部节点 covered → finish_session",
+        "hint": "draft → save_outline/confirm_outline；confirmed → answer/skip ready 题；全部节点 covered → finish_session → spec/tickets → 开发 → archive_round 收尾",
     }))
 }
 
@@ -1238,4 +1303,66 @@ fn run_ticket(ctx: &McpContext, args: &Value) -> Result<Value, String> {
         reply,
     })?;
     Ok(json!({ "ok": true, "branch": branch, "note": "开发线已启动，用 get_timeline / get_agent_log 观察进度" }))
+}
+
+// ==================== development rounds ====================
+
+fn start_round(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let title = arg_str(args, "title")?.to_string();
+    let goal = args
+        .get("goal")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let app_handle = app(ctx)?;
+    let round = sched_call(ctx, |reply| SchedulerMsg::StartRound {
+        session_id: id,
+        title,
+        goal,
+        app_handle,
+        reply,
+    })?;
+    Ok(json!({
+        "ok": true,
+        "round": round,
+        "note": "第 N 轮已开启，访谈大纲生成中——轮询 get_outline 到 draft 后 confirm_outline"
+    }))
+}
+
+fn archive_round(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let force = args
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let app_handle = app(ctx)?;
+    let round = sched_call(ctx, |reply| SchedulerMsg::ArchiveRound {
+        session_id: id,
+        force,
+        app_handle,
+        reply,
+    })?;
+    Ok(json!({
+        "ok": true,
+        "round": round,
+        "note": "已归档；数据快照在工作区 archives/round-<N>/，用 start_round 开下一轮"
+    }))
+}
+
+fn list_rounds(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let id = session_id(args)?;
+    let rounds = sched_call(ctx, |reply| SchedulerMsg::ListRounds {
+        session_id: id,
+        reply,
+    })?;
+    Ok(json!({ "rounds": rounds, "count": rounds.len() }))
+}
+
+fn get_round_archive(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let rid = arg_str(args, "round_id")?.to_string();
+    let archive = sched_call(ctx, |reply| SchedulerMsg::GetRoundArchive {
+        round_id: rid,
+        reply,
+    })?;
+    serde_json::to_value(archive).map_err(|e| e.to_string())
 }

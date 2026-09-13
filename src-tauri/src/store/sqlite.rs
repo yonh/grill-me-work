@@ -1,5 +1,5 @@
 use crate::model::*;
-use crate::store::{Result, Store};
+use crate::store::{Result, Store, StoreError};
 use rusqlite::{params, Connection};
 use std::sync::Mutex;
 
@@ -284,8 +284,104 @@ impl SqliteStore {
             "#,
         )?;
 
+        // Development rounds: one round = one dev cycle (interview → spec →
+        // tickets → branch development → archive). Round-scoped rows carry
+        // `round_id` and are only visible while that round is current.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS rounds (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                goal TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                pipeline_stage TEXT,
+                spec TEXT,
+                summary TEXT,
+                created_at TEXT NOT NULL,
+                archived_at TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_rounds_session ON rounds(session_id);
+            "#,
+        )?;
+
+        for (table, col) in [
+            ("sessions", "current_round_id"),
+            ("questions", "round_id"),
+            ("outline_nodes", "round_id"),
+            ("tickets", "round_id"),
+            ("messages", "round_id"),
+            ("decision_summary", "round_id"),
+            ("batches", "round_id"),
+        ] {
+            if !table_has_column(conn, table, col)? {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {col} TEXT;"
+                ))?;
+            }
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_questions_round ON questions(round_id);
+             CREATE INDEX IF NOT EXISTS idx_outline_nodes_round ON outline_nodes(round_id);
+             CREATE INDEX IF NOT EXISTS idx_tickets_round ON tickets(round_id);
+             CREATE INDEX IF NOT EXISTS idx_messages_round ON messages(round_id);",
+        )?;
+
+        // Backfill: sessions with no rounds get round 1 owning all existing data.
+        {
+            let mut stmt = conn.prepare(
+                "SELECT s.id, s.title, s.initial_context, s.pipeline_stage, s.spec, s.created_at
+                 FROM sessions s
+                 WHERE NOT EXISTS (SELECT 1 FROM rounds r WHERE r.session_id = s.id)",
+            )?;
+            let pending: Vec<(String, String, Option<String>, Option<String>, Option<String>, String)> = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            let now = chrono::Utc::now().to_rfc3339();
+            for (sid, title, goal, stage, spec, created) in pending {
+                let rid = format!("{sid}-r1");
+                conn.execute(
+                    "INSERT OR IGNORE INTO rounds (id, session_id, number, title, goal, status, pipeline_stage, spec, created_at) VALUES (?1, ?2, 1, ?3, ?4, 'active', ?5, ?6, ?7)",
+                    params![rid, sid, title, goal, stage, spec, created],
+                )?;
+                conn.execute(
+                    "UPDATE sessions SET current_round_id = ?1 WHERE id = ?2 AND current_round_id IS NULL",
+                    params![rid, sid],
+                )?;
+                for t in ["questions", "outline_nodes", "tickets", "messages", "decision_summary", "batches"] {
+                    conn.execute(
+                        &format!("UPDATE {t} SET round_id = ?1 WHERE session_id = ?2 AND round_id IS NULL"),
+                        params![rid, sid],
+                    )?;
+                }
+            }
+        }
+
         Ok(())
     }
+}
+
+fn table_has_column(conn: &Connection, table: &str, col: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for r in rows {
+        if r? == col {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
@@ -303,6 +399,7 @@ fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
             .map(|s| PipelineStage::from_str(s.as_str()))
             .unwrap_or(PipelineStage::None),
         spec: row.get("spec")?,
+        current_round_id: row.get("current_round_id")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -321,6 +418,25 @@ fn row_to_ticket(row: &rusqlite::Row) -> rusqlite::Result<Ticket> {
         branches: serde_json::from_str(&branches_json).unwrap_or_default(),
         display_order: row.get("display_order")?,
         created_at: row.get("created_at")?,
+    })
+}
+
+fn row_to_round(row: &rusqlite::Row) -> rusqlite::Result<Round> {
+    Ok(Round {
+        id: row.get("id")?,
+        session_id: row.get("session_id")?,
+        number: row.get("number")?,
+        title: row.get("title")?,
+        goal: row.get("goal")?,
+        status: RoundStatus::from_str(row.get::<_, String>("status")?.as_str()),
+        pipeline_stage: row
+            .get::<_, Option<String>>("pipeline_stage")?
+            .map(|s| PipelineStage::from_str(s.as_str()))
+            .unwrap_or(PipelineStage::None),
+        spec: row.get("spec")?,
+        summary: row.get("summary")?,
+        created_at: row.get("created_at")?,
+        archived_at: row.get("archived_at")?,
     })
 }
 
@@ -364,7 +480,7 @@ impl Store for SqliteStore {
     fn create_session(&self, session: &Session) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, title, initial_context, role, status, outline_status, pipeline_stage, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO sessions (id, title, initial_context, role, status, outline_status, pipeline_stage, current_round_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 session.id,
                 session.title,
@@ -373,6 +489,7 @@ impl Store for SqliteStore {
                 session.status.as_str(),
                 session.outline_status.as_str(),
                 session.pipeline_stage.as_str(),
+                session.current_round_id,
                 session.created_at,
                 session.updated_at,
             ],
@@ -382,11 +499,14 @@ impl Store for SqliteStore {
 
     fn delete_session(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM decision_summary WHERE session_id = ?1", params![id])?;
-        conn.execute("DELETE FROM outline_nodes WHERE session_id = ?1", params![id])?;
+        conn.execute("DELETE FROM decision_summary WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)", params![id])?;
+        conn.execute("DELETE FROM outline_nodes WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)", params![id])?;
         conn.execute("DELETE FROM tickets WHERE session_id = ?1", params![id])?;
-        conn.execute("DELETE FROM questions WHERE session_id = ?1", params![id])?;
-        conn.execute("DELETE FROM batches WHERE session_id = ?1", params![id])?;
+        conn.execute("DELETE FROM questions WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)", params![id])?;
+        conn.execute("DELETE FROM batches WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)", params![id])?;
+        conn.execute("DELETE FROM messages WHERE session_id = ?1", params![id])?;
+        conn.execute("DELETE FROM prototype_versions WHERE session_id = ?1", params![id])?;
+        conn.execute("DELETE FROM rounds WHERE session_id = ?1", params![id])?;
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -394,7 +514,7 @@ impl Store for SqliteStore {
     fn get_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
-            conn.prepare("SELECT id, title, initial_context, role, status, summary, prototype_version, outline_status, pipeline_stage, spec, created_at, updated_at FROM sessions ORDER BY created_at DESC")?;
+            conn.prepare("SELECT id, title, initial_context, role, status, summary, prototype_version, outline_status, pipeline_stage, spec, current_round_id, created_at, updated_at FROM sessions ORDER BY created_at DESC")?;
         let rows = stmt.query_map([], row_to_session)?;
         let mut sessions = Vec::new();
         for row in rows {
@@ -406,7 +526,7 @@ impl Store for SqliteStore {
     fn get_session(&self, id: &str) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, initial_context, role, status, summary, prototype_version, outline_status, pipeline_stage, spec, created_at, updated_at FROM sessions WHERE id = ?1",
+            "SELECT id, title, initial_context, role, status, summary, prototype_version, outline_status, pipeline_stage, spec, current_round_id, created_at, updated_at FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_session)?;
         if let Some(row) = rows.next() {
@@ -419,7 +539,7 @@ impl Store for SqliteStore {
     fn get_questions(&self, session_id: &str) -> Result<Vec<Question>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id FROM questions WHERE session_id = ?1 ORDER BY display_order ASC",
+            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id FROM questions WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1) ORDER BY display_order ASC",
         )?;
         let rows = stmt.query_map(params![session_id], row_to_question)?;
         let mut questions = Vec::new();
@@ -438,7 +558,7 @@ impl Store for SqliteStore {
             None => None,
         };
         conn.execute(
-            "INSERT OR REPLACE INTO questions (id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT OR REPLACE INTO questions (id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id, round_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, (SELECT current_round_id FROM sessions WHERE id = ?2))",
             params![
                 q.id,
                 q.session_id,
@@ -503,7 +623,7 @@ impl Store for SqliteStore {
     fn get_answered_questions(&self, session_id: &str) -> Result<Vec<Question>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id FROM questions WHERE session_id = ?1 AND status = 'answered' ORDER BY display_order ASC",
+            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id FROM questions WHERE session_id = ?1 AND status = 'answered' AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1) ORDER BY display_order ASC",
         )?;
         let rows = stmt.query_map(params![session_id], row_to_question)?;
         let mut questions = Vec::new();
@@ -516,7 +636,7 @@ impl Store for SqliteStore {
     fn get_decision_summary(&self, session_id: &str) -> Result<Vec<DecisionEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT question_id, question, answer, rationale, category FROM decision_summary WHERE session_id = ?1 ORDER BY display_order ASC",
+            "SELECT question_id, question, answer, rationale, category FROM decision_summary WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1) ORDER BY display_order ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
             Ok(DecisionEntry {
@@ -552,7 +672,7 @@ impl Store for SqliteStore {
             } else {
                 let max: i32 = conn
                     .query_row(
-                        "SELECT COALESCE(MAX(display_order), 0) + 1 FROM decision_summary WHERE session_id = ?1",
+                        "SELECT COALESCE(MAX(display_order), 0) + 1 FROM decision_summary WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)",
                         params![session_id],
                         |row| row.get(0),
                     )
@@ -561,7 +681,7 @@ impl Store for SqliteStore {
             }
         };
         conn.execute(
-            "INSERT OR REPLACE INTO decision_summary (question_id, session_id, question, answer, rationale, category, display_order) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO decision_summary (question_id, session_id, question, answer, rationale, category, display_order, round_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, (SELECT current_round_id FROM sessions WHERE id = ?2))",
             params![
                 entry.question_id,
                 session_id,
@@ -579,7 +699,7 @@ impl Store for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let triggered_json = serde_json::to_string(&batch.triggered_by_answers)?;
         conn.execute(
-            "INSERT INTO batches (id, session_id, batch_no, status, triggered_by_answers_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO batches (id, session_id, batch_no, status, triggered_by_answers_json, created_at, round_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT current_round_id FROM sessions WHERE id = ?2))",
             params![
                 batch.id,
                 batch.session_id,
@@ -605,7 +725,7 @@ impl Store for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let max: i32 = conn
             .query_row(
-                "SELECT COALESCE(MAX(batch_no), 0) FROM batches WHERE session_id = ?1",
+                "SELECT COALESCE(MAX(batch_no), 0) FROM batches WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)",
                 params![session_id],
                 |row| row.get(0),
             )
@@ -617,7 +737,7 @@ impl Store for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let max: i32 = conn
             .query_row(
-                "SELECT COALESCE(MAX(display_order), 0) FROM questions WHERE session_id = ?1",
+                "SELECT COALESCE(MAX(display_order), 0) FROM questions WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)",
                 params![session_id],
                 |row| row.get(0),
             )
@@ -629,7 +749,7 @@ impl Store for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let count: i32 = conn
             .query_row(
-                "SELECT COUNT(*) FROM questions WHERE session_id = ?1 AND status = 'ready'",
+                "SELECT COUNT(*) FROM questions WHERE session_id = ?1 AND status = 'ready' AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)",
                 params![session_id],
                 |row| row.get(0),
             )
@@ -821,7 +941,7 @@ impl Store for SqliteStore {
     fn find_dependents(&self, session_id: &str, question_id: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, depends_on_json FROM questions WHERE session_id = ?1 AND status IN ('ready', 'generating', 'stale')",
+            "SELECT id, depends_on_json FROM questions WHERE session_id = ?1 AND status IN ('ready', 'generating', 'stale') AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
             let id: String = row.get(0)?;
@@ -857,7 +977,7 @@ impl Store for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let count: i32 = conn
             .query_row(
-                "SELECT COUNT(*) FROM questions WHERE session_id = ?1 AND status IN ('answered', 'skipped')",
+                "SELECT COUNT(*) FROM questions WHERE session_id = ?1 AND status IN ('answered', 'skipped') AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)",
                 params![session_id],
                 |row| row.get(0),
             )
@@ -869,7 +989,7 @@ impl Store for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let count: i32 = conn
             .query_row(
-                "SELECT COUNT(*) FROM questions WHERE session_id = ?1 AND status = 'skipped'",
+                "SELECT COUNT(*) FROM questions WHERE session_id = ?1 AND status = 'skipped' AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)",
                 params![session_id],
                 |row| row.get(0),
             )
@@ -881,7 +1001,7 @@ impl Store for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let question_ids_json = serde_json::to_string(&msg.question_ids)?;
         conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, question_ids, tool_calls, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO messages (id, session_id, role, content, question_ids, tool_calls, created_at, round_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, (SELECT current_round_id FROM sessions WHERE id = ?2))",
             params![msg.id, msg.session_id, msg.role, msg.content, question_ids_json, None::<String>, msg.created_at],
         )?;
         Ok(())
@@ -890,7 +1010,7 @@ impl Store for SqliteStore {
     fn get_messages(&self, session_id: &str) -> Result<Vec<ChatMessage>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, role, content, question_ids, created_at FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
+            "SELECT id, session_id, role, content, question_ids, created_at FROM messages WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1) ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
             let question_ids_json: String = row.get(4).unwrap_or_default();
@@ -923,7 +1043,7 @@ impl Store for SqliteStore {
     fn get_outline_nodes(&self, session_id: &str) -> Result<Vec<OutlineNode>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, title, description, status, display_order, created_at FROM outline_nodes WHERE session_id = ?1 ORDER BY display_order ASC",
+            "SELECT id, session_id, title, description, status, display_order, created_at FROM outline_nodes WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1) ORDER BY display_order ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
             Ok(OutlineNode {
@@ -946,12 +1066,12 @@ impl Store for SqliteStore {
     fn replace_outline_nodes(&self, session_id: &str, nodes: &[OutlineNode]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "DELETE FROM outline_nodes WHERE session_id = ?1",
+            "DELETE FROM outline_nodes WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)",
             params![session_id],
         )?;
         for node in nodes {
             conn.execute(
-                "INSERT INTO outline_nodes (id, session_id, title, description, status, display_order, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO outline_nodes (id, session_id, title, description, status, display_order, created_at, round_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, (SELECT current_round_id FROM sessions WHERE id = ?2))",
                 params![
                     node.id,
                     session_id,
@@ -965,7 +1085,7 @@ impl Store for SqliteStore {
         }
         // Orphan questions whose node was removed
         conn.execute(
-            "UPDATE questions SET outline_node_id = NULL WHERE session_id = ?1 AND outline_node_id IS NOT NULL AND outline_node_id NOT IN (SELECT id FROM outline_nodes WHERE session_id = ?1)",
+            "UPDATE questions SET outline_node_id = NULL WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1) AND outline_node_id IS NOT NULL AND outline_node_id NOT IN (SELECT id FROM outline_nodes WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1))",
             params![session_id],
         )?;
         Ok(())
@@ -988,7 +1108,7 @@ impl Store for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let placeholders = node_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "UPDATE questions SET status = 'skipped' WHERE session_id = ? AND status IN ('ready', 'stale') AND outline_node_id IN ({placeholders})"
+            "UPDATE questions SET status = 'skipped' WHERE session_id = ? AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1) AND status IN ('ready', 'stale') AND outline_node_id IN ({placeholders})"
         );
         let mut stmt = conn.prepare(&sql)?;
         let mut param_values: Vec<rusqlite::types::Value> =
@@ -1005,7 +1125,7 @@ impl Store for SqliteStore {
     fn get_skipped_questions(&self, session_id: &str) -> Result<Vec<Question>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id FROM questions WHERE session_id = ?1 AND status = 'skipped' ORDER BY display_order ASC",
+            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id FROM questions WHERE session_id = ?1 AND status = 'skipped' AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1) ORDER BY display_order ASC",
         )?;
         let rows = stmt.query_map(params![session_id], row_to_question)?;
         let mut questions = Vec::new();
@@ -1038,7 +1158,7 @@ impl Store for SqliteStore {
     fn get_tickets(&self, session_id: &str) -> Result<Vec<Ticket>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
-            "SELECT {TICKET_COLUMNS} FROM tickets WHERE session_id = ?1 ORDER BY display_order ASC"
+            "SELECT {TICKET_COLUMNS} FROM tickets WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1) ORDER BY display_order ASC"
         ))?;
         let rows = stmt.query_map(params![session_id], row_to_ticket)?;
         let mut tickets = Vec::new();
@@ -1064,11 +1184,11 @@ impl Store for SqliteStore {
     fn replace_tickets(&self, session_id: &str, tickets: &[Ticket]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "DELETE FROM tickets WHERE session_id = ?1",
+            "DELETE FROM tickets WHERE session_id = ?1 AND round_id IS (SELECT current_round_id FROM sessions WHERE id = ?1)",
             params![session_id],
         )?;
         let mut stmt = conn.prepare(&format!(
-            "INSERT INTO tickets ({TICKET_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+            "INSERT INTO tickets ({TICKET_COLUMNS}, round_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, (SELECT current_round_id FROM sessions WHERE id = ?2))"
         ))?;
         for t in tickets {
             stmt.execute(params![
@@ -1111,5 +1231,171 @@ impl Store for SqliteStore {
             params![serde_json::to_string(&branches).unwrap_or_else(|_| "[]".into()), ticket_id],
         )?;
         Ok(())
+    }
+
+    // ==================== Development rounds ====================
+
+    fn create_round(&self, round: &Round) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO rounds (id, session_id, number, title, goal, status, pipeline_stage, spec, summary, created_at, archived_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                round.id,
+                round.session_id,
+                round.number,
+                round.title,
+                round.goal,
+                round.status.as_str(),
+                round.pipeline_stage.as_str(),
+                round.spec,
+                round.summary,
+                round.created_at,
+                round.archived_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn update_round(&self, round: &Round) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE rounds SET title = ?1, goal = ?2, status = ?3, pipeline_stage = ?4, spec = ?5, summary = ?6, archived_at = ?7 WHERE id = ?8",
+            params![
+                round.title,
+                round.goal,
+                round.status.as_str(),
+                round.pipeline_stage.as_str(),
+                round.spec,
+                round.summary,
+                round.archived_at,
+                round.id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn get_rounds(&self, session_id: &str) -> Result<Vec<Round>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, number, title, goal, status, pipeline_stage, spec, summary, created_at, archived_at FROM rounds WHERE session_id = ?1 ORDER BY number ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], row_to_round)?;
+        let mut rounds = Vec::new();
+        for row in rows {
+            rounds.push(row?);
+        }
+        Ok(rounds)
+    }
+
+    fn get_round(&self, round_id: &str) -> Result<Option<Round>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, number, title, goal, status, pipeline_stage, spec, summary, created_at, archived_at FROM rounds WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![round_id], row_to_round)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    fn get_current_round(&self, session_id: &str) -> Result<Option<Round>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, number, title, goal, status, pipeline_stage, spec, summary, created_at, archived_at FROM rounds WHERE id = (SELECT current_round_id FROM sessions WHERE id = ?1)",
+        )?;
+        let mut rows = stmt.query_map(params![session_id], row_to_round)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    fn set_current_round(&self, session_id: &str, round_id: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE sessions SET current_round_id = ?1, updated_at = ?2 WHERE id = ?3",
+            params![round_id, now, session_id],
+        )?;
+        Ok(())
+    }
+
+    fn get_round_archive(&self, round_id: &str) -> Result<RoundArchive> {
+        let conn = self.conn.lock().unwrap();
+        let round = {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, number, title, goal, status, pipeline_stage, spec, summary, created_at, archived_at FROM rounds WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query_map(params![round_id], row_to_round)?;
+            rows.next()
+                .transpose()?
+                .ok_or_else(|| StoreError::NotFound(format!("round {round_id}")))?
+        };
+        let nodes = {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, title, description, status, display_order, created_at FROM outline_nodes WHERE round_id = ?1 ORDER BY display_order ASC",
+            )?;
+            let rows = stmt.query_map(params![round_id], |row| {
+                Ok(OutlineNode {
+                    id: row.get("id")?,
+                    session_id: row.get("session_id")?,
+                    title: row.get("title")?,
+                    description: row.get("description")?,
+                    status: OutlineNodeStatus::from_str(row.get::<_, String>("status")?.as_str()),
+                    display_order: row.get("display_order")?,
+                    created_at: row.get("created_at")?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let questions = {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id FROM questions WHERE round_id = ?1 ORDER BY display_order ASC",
+            )?;
+            let rows = stmt.query_map(params![round_id], row_to_question)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let tickets = {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {TICKET_COLUMNS} FROM tickets WHERE round_id = ?1 ORDER BY display_order ASC"
+            ))?;
+            let rows = stmt.query_map(params![round_id], row_to_ticket)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let messages = {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, role, content, question_ids, created_at FROM messages WHERE round_id = ?1 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map(params![round_id], |row| {
+                let question_ids_json: String = row.get(4).unwrap_or_default();
+                Ok(ChatMessage {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    role: row.get(2)?,
+                    content: row.get(3)?,
+                    question_ids: serde_json::from_str(&question_ids_json).unwrap_or_default(),
+                    created_at: row.get(5)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let decisions = {
+            let mut stmt = conn.prepare(
+                "SELECT question_id, question, answer, rationale, category FROM decision_summary WHERE round_id = ?1 ORDER BY display_order ASC",
+            )?;
+            let rows = stmt.query_map(params![round_id], |row| {
+                Ok(DecisionEntry {
+                    question_id: row.get("question_id")?,
+                    question: row.get("question")?,
+                    answer: row.get("answer")?,
+                    rationale: row.get("rationale")?,
+                    category: QuestionCategory::from_str(row.get::<_, String>("category")?.as_str()),
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(RoundArchive {
+            round,
+            nodes,
+            questions,
+            tickets,
+            messages,
+            decisions,
+        })
     }
 }

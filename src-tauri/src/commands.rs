@@ -945,3 +945,81 @@ pub async fn run_ticket(
     rx.await
         .map_err(|_| "scheduler actor dropped reply".to_string())?
 }
+
+// --- Development rounds ---
+
+#[tauri::command]
+pub async fn start_round(
+    session_id: String,
+    title: String,
+    goal: Option<String>,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<crate::model::Round, String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::StartRound {
+            session_id,
+            title,
+            goal,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn archive_round(
+    session_id: String,
+    force: Option<bool>,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<crate::model::Round, String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::ArchiveRound {
+            session_id,
+            force: force.unwrap_or(false),
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn list_rounds(
+    session_id: String,
+    state: State<'_, ActorHandle>,
+) -> Result<Vec<crate::model::Round>, String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::ListRounds { session_id, reply })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn get_round_archive(
+    round_id: String,
+    state: State<'_, ActorHandle>,
+) -> Result<crate::model::RoundArchive, String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::GetRoundArchive { round_id, reply })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
