@@ -177,8 +177,8 @@ impl SchedulerState {
     }
 }
 
-pub async fn run_actor(store: Box<dyn Store>, mut rx: mpsc::Receiver<SchedulerMsg>, tx: mpsc::Sender<SchedulerMsg>) {
-    let store: Arc<dyn Store> = Arc::from(store);
+pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMsg>, tx: mpsc::Sender<SchedulerMsg>) {
+    let store: Arc<dyn Store> = store;
     let mut state = SchedulerState {
         sessions: HashMap::new(),
     };

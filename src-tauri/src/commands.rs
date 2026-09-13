@@ -592,3 +592,14 @@ pub async fn cancel_iteration_graph(
     rx.await
         .map_err(|_| "scheduler actor dropped reply".to_string())?
 }
+
+/// MCP server endpoint info for the UI / debugging.
+#[tauri::command]
+pub async fn get_mcp_info() -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "default_port": crate::mcp::DEFAULT_MCP_PORT,
+        "tools": crate::mcp::tools::tool_names(),
+        "endpoint_hint": format!("http://127.0.0.1:{}/mcp", crate::mcp::DEFAULT_MCP_PORT),
+        "health_hint": format!("http://127.0.0.1:{}/health", crate::mcp::DEFAULT_MCP_PORT),
+    }))
+}

@@ -5,6 +5,7 @@ pub mod export;
 pub mod git;
 pub mod graph;
 pub mod llm;
+pub mod mcp;
 pub mod model;
 pub mod prototype;
 pub mod scheduler;
@@ -15,6 +16,7 @@ use commands::ActorHandle;
 use scheduler::SchedulerMsg;
 use store::sqlite::SqliteStore;
 use store::Store;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 fn get_db_path() -> String {
@@ -32,18 +34,23 @@ pub fn run() {
     log::info!("Database path: {}", db_path);
 
     let store = SqliteStore::new(&db_path).expect("Failed to open database");
-    let store_box: Box<dyn Store> = Box::new(store);
+    let store: Arc<dyn Store> = Arc::new(store);
 
     let (tx, rx) = mpsc::channel::<SchedulerMsg>(100);
     let tx_clone = tx.clone();
 
+    // MCP server so external AI agents can drive Grill-Me (list_sessions, …).
+    let mcp_port = mcp::start_mcp_server(store.clone(), tx.clone());
+    log::info!("[mcp] port={mcp_port}");
+
+    let store_for_actor = store.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(ActorHandle { tx })
-        .setup(|_app| {
+        .setup(move |_app| {
             tauri::async_runtime::spawn(async move {
-                scheduler::run_actor(store_box, rx, tx_clone).await;
+                scheduler::run_actor(store_for_actor, rx, tx_clone).await;
             });
             Ok(())
         })
@@ -80,6 +87,7 @@ pub fn run() {
             commands::save_iteration_graph,
             commands::run_iteration_graph,
             commands::cancel_iteration_graph,
+            commands::get_mcp_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

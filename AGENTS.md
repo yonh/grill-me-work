@@ -79,6 +79,27 @@ Grill-Me **不自己写原型代码**。每次需要更新时：
 - 读 `git log --all`；节点 = commit；分支 tip 高亮
 - 预览历史版本 / 切分支 / 从选中 commit 开新时间线
 
+## MCP（AI 接入）
+
+应用启动时在 `127.0.0.1:8787`（端口占用则 +1）拉起 MCP HTTP 服务，外部 AI 可调用全部能力。
+
+| 端点 | 说明 |
+|------|------|
+| `POST /mcp` | JSON-RPC 2.0：`initialize` / `tools/list` / `tools/call` |
+| `GET /health` | 健康检查 + 当前工具列表 |
+
+已实现工具：
+
+- `list_sessions` — 列出项目/会话（id、标题、状态、工作区路径、是否已有原型）
+
+扩展方式：在 `src-tauri/src/mcp/tools.rs` 注册 tool 定义 + handler；handler 拿 `McpContext`（`store` + `scheduler_tx`）。
+
+```bash
+curl -s http://127.0.0.1:8787/health
+curl -s http://127.0.0.1:8787/mcp -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_sessions","arguments":{}}}'
+```
+
 ## 事件
 
 - `prototype_status`: generating | done | failed
