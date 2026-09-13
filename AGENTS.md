@@ -164,6 +164,8 @@ interviewing ──generate_spec──→ spec_draft ──confirm_spec──→
 - `graph_node_status`: per-node running/completed/failed + commit sha
 - `timeline_updated`: branch/head 变更
 - `pipeline_updated`: { session_id, stage, spec, tickets, running }
+- `activity`: 操作动态（MCP 变更调用、流水线流转、轮次开/归档、开发线启停、答题/跳题），持久化在 `activities` 表 → 右侧「动态」页签
+- `round_started` / `round_archived`: 开发轮次生命周期
 - 以及 v1 的 new_question / stale_marked / batch_status / error / chat_*
 
 ## 布局
