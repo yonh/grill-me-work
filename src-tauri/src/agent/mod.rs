@@ -414,3 +414,31 @@ pub fn run_agent_to_completion(
 
     Ok(status.code().unwrap_or(-1))
 }
+
+// ==================== internal app log (debug observability via MCP) ====================
+
+const APP_LOG_CAP: usize = 500;
+
+fn app_log_buf() -> &'static Mutex<VecDeque<String>> {
+    static C: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// Internal event trace — readable via `get_app_log` for debugging async flows
+/// (outline/spec/ticket generation) that don't surface through agent logs.
+pub fn push_app_log(tag: &str, msg: &str) {
+    let mut g = app_log_buf().lock().unwrap();
+    g.push_back(format!("{} [{tag}] {msg}", chrono::Utc::now().format("%H:%M:%S%.3f")));
+    while g.len() > APP_LOG_CAP {
+        g.pop_front();
+    }
+    log::info!("[{tag}] {msg}");
+}
+
+pub fn get_app_log(tail: Option<usize>) -> Vec<String> {
+    let g = app_log_buf().lock().unwrap();
+    match tail {
+        Some(n) => g.iter().skip(g.len().saturating_sub(n)).cloned().collect(),
+        None => g.iter().cloned().collect(),
+    }
+}

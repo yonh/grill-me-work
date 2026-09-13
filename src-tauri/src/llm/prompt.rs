@@ -648,7 +648,12 @@ pub fn build_spec_user_prompt(
                 OutlineNodeStatus::Excluded => "✗(已排除)",
                 OutlineNodeStatus::Pending => "○",
             };
-            prompt.push_str(&format!("- {mark} {}：{}\n", n.title, n.description.as_deref().unwrap_or("")));
+            prompt.push_str(&format!(
+                "- {mark} [{}] {}：{}\n",
+                n.id,
+                n.title,
+                n.description.as_deref().unwrap_or("")
+            ));
         }
     }
     if !decision_summary.is_empty() {

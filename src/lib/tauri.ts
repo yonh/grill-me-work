@@ -313,6 +313,18 @@ export function onPipelineUpdated(
   });
 }
 
+export function onSessionCreated(
+  cb: (session: Session) => void
+): Promise<UnlistenFn> {
+  return listen<Session>("session_created", (e) => cb(e.payload));
+}
+
+export function onSessionDeleted(
+  cb: (session_id: string) => void
+): Promise<UnlistenFn> {
+  return listen<{ session_id: string }>("session_deleted", (e) => cb(e.payload.session_id));
+}
+
 export function onActiveSessionChanged(
   cb: (payload: { session_id: string | null; title?: string | null }) => void
 ): Promise<UnlistenFn> {

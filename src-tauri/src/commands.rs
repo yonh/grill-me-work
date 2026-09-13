@@ -25,6 +25,7 @@ pub async fn create_session(
             title,
             role,
             initial_context,
+            app_handle: app_handle.clone(),
             reply,
         })
         .await
@@ -52,11 +53,16 @@ pub async fn create_session(
 pub async fn delete_session(
     id: String,
     state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
 ) -> Result<(), String> {
     let (reply, rx) = oneshot::channel();
     state
         .tx
-        .send(SchedulerMsg::DeleteSession { id, reply })
+        .send(SchedulerMsg::DeleteSession {
+            id,
+            app_handle,
+            reply,
+        })
         .await
         .map_err(|_| "scheduler actor disconnected".to_string())?;
     rx.await

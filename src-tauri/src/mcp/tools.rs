@@ -73,6 +73,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "cancel_graph",
         "cancel_prototype",
         "get_agent_log",
+        "get_app_log",
         // --- pipeline: spec → tickets → branch-map development ---
         "get_pipeline",
         "generate_spec",
@@ -472,6 +473,7 @@ pub fn call_tool(ctx: &McpContext, name: &str, args: &Value) -> Result<Value, St
         "cancel_graph" => cancel_graph(ctx, args),
         "cancel_prototype" => cancel_prototype(ctx, args),
         "get_agent_log" => get_agent_log(ctx, args),
+        "get_app_log" => get_app_log(ctx, args),
         "get_pipeline" => get_pipeline(ctx, args),
         "generate_spec" => generate_spec(ctx, args),
         "save_spec" => save_spec(ctx, args),
@@ -617,10 +619,12 @@ fn create_session(ctx: &McpContext, args: &Value) -> Result<Value, String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    let app_handle = app(ctx)?;
     let session = sched_call(ctx, |reply| SchedulerMsg::CreateSession {
         title,
         role,
         initial_context,
+        app_handle: app_handle.clone(),
         reply,
     })?;
 
@@ -628,7 +632,7 @@ fn create_session(ctx: &McpContext, args: &Value) -> Result<Value, String> {
     // the outline first (status → generating → draft) and waits for confirmation.
     sched_send(ctx, SchedulerMsg::StartInitialBatch {
         session_id: session.id.clone(),
-        app_handle: app(ctx)?,
+        app_handle,
     })?;
 
     log::info!("[mcp] create_session → {}", session.id);
@@ -1053,6 +1057,16 @@ fn get_agent_log(ctx: &McpContext, args: &Value) -> Result<Value, String> {
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
     let lines = crate::agent::get_agent_log(&id, tail);
+    Ok(json!({ "count": lines.len(), "lines": lines }))
+}
+
+fn get_app_log(ctx: &McpContext, args: &Value) -> Result<Value, String> {
+    let _ = ctx;
+    let tail = args
+        .get("tail")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let lines = crate::agent::get_app_log(tail);
     Ok(json!({ "count": lines.len(), "lines": lines }))
 }
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { api, onActiveSessionChanged } from "@/lib/tauri";
+import { api, onActiveSessionChanged, onSessionCreated, onSessionDeleted } from "@/lib/tauri";
 import { useSessionStore } from "@/store/sessionStore";
 import { toast } from "sonner";
 
@@ -70,6 +70,27 @@ export function useSessions() {
       mounted = false;
     };
   }, [setSessions, setLoading, setCurrentSession, loadQuestions]);
+
+  // Sessions created/deleted outside the UI (MCP) push events to keep the
+  // sidebar in sync — the list is only fully loaded at startup otherwise.
+  useEffect(() => {
+    let cancelled = false;
+    const unsubs: (() => void)[] = [];
+    onSessionCreated((session) => {
+      if (cancelled) return;
+      if (useSessionStore.getState().sessions.some((s) => s.id === session.id)) return;
+      addSession(session);
+      toast.info(`新项目已创建：${session.title}`);
+    }).then((u) => { if (cancelled) u(); else unsubs.push(u); });
+    onSessionDeleted((id) => {
+      if (cancelled) return;
+      removeSession(id);
+    }).then((u) => { if (cancelled) u(); else unsubs.push(u); });
+    return () => {
+      cancelled = true;
+      unsubs.forEach((u) => u());
+    };
+  }, [addSession, removeSession]);
 
   // MCP (or another window path) can switch the open project.
   useEffect(() => {

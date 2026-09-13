@@ -17,10 +17,12 @@ pub enum SchedulerMsg {
         title: String,
         role: String,
         initial_context: Option<String>,
+        app_handle: AppHandle,
         reply: oneshot::Sender<Result<Session, String>>,
     },
     DeleteSession {
         id: String,
+        app_handle: AppHandle,
         reply: oneshot::Sender<Result<(), String>>,
     },
     GetSessions {
@@ -336,22 +338,34 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                 title,
                 role,
                 initial_context,
+                app_handle,
                 reply,
             } => {
                 log::info!("[scheduler] CreateSession: title=\"{}\", role=\"{}\", has_context={}", title, role, initial_context.is_some());
                 let result = handle_create_session(&*store, &title, &role, initial_context);
                 match &result {
-                    Ok(session) => log::info!("[scheduler] CreateSession OK: session_id={}", session.id),
+                    Ok(session) => {
+                        log::info!("[scheduler] CreateSession OK: session_id={}", session.id);
+                        let _ = app_handle.emit("session_created", session);
+                    }
                     Err(e) => log::error!("[scheduler] CreateSession FAILED: {}", e),
                 }
                 let _ = reply.send(result);
             }
-            SchedulerMsg::DeleteSession { id, reply } => {
+            SchedulerMsg::DeleteSession {
+                id,
+                app_handle,
+                reply,
+            } => {
                 log::info!("[scheduler] DeleteSession: id={}", id);
                 let result = store.delete_session(&id).map_err(|e| e.to_string());
                 state.sessions.remove(&id);
                 if result.is_ok() {
                     crate::active_session::clear_if_matches(store.as_ref(), &id, None);
+                    let _ = app_handle.emit(
+                        "session_deleted",
+                        serde_json::json!({ "session_id": id }),
+                    );
                 }
                 let _ = reply.send(result);
             }
@@ -2955,11 +2969,16 @@ fn spawn_outline_generation(
 
     let session_id = session_id.to_string();
     let app_handle = app_handle.clone();
+    let tx_done = scheduler_tx.clone();
     tokio::spawn(async move {
+        crate::agent::push_app_log("outline", &format!("task started: {}", session_id));
         let session = match store.get_session(&session_id) {
             Ok(Some(s)) => s,
             _ => {
                 log::error!("[outline] session not found: {}", session_id);
+                let _ = tx_done.try_send(SchedulerMsg::OutlineDone {
+                    session_id: session_id.clone(),
+                });
                 return;
             }
         };
@@ -2972,10 +2991,13 @@ fn spawn_outline_generation(
         );
         let system_prompt = prompt::build_outline_system_prompt(&session.role);
         let user_prompt = prompt::build_outline_user_prompt(&session);
+        crate::agent::push_app_log("outline", &format!("llm call start: {}", session_id));
 
         match client.generate_summary(&system_prompt, &user_prompt).await {
             Ok(text) => {
+                crate::agent::push_app_log("outline", &format!("llm done: {} ({} chars)", session_id, text.len()));
                 let parsed = prompt::parse_outline_response(&text);
+                crate::agent::push_app_log("outline", &format!("parsed {} nodes: {}", parsed.len(), session_id));
                 if parsed.is_empty() {
                     log::warn!("[outline] empty/parse-failed outline for session={}", session_id);
                     let _ =
@@ -3024,11 +3046,13 @@ fn spawn_outline_generation(
                     })
                     .collect();
 
+                crate::agent::push_app_log("outline", &format!("store write start: {} nodes", nodes.len()));
                 let result = store
                     .replace_outline_nodes(&session_id, &nodes)
                     .and_then(|_| {
                         store.set_session_outline_status(&session_id, OutlineStatus::Draft)
                     });
+                crate::agent::push_app_log("outline", &format!("store write done: {:?}", result.is_ok()));
                 if let Err(e) = result {
                     log::error!("[outline] save failed: {}", e);
                     return;
