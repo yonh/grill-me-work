@@ -3636,10 +3636,13 @@ fn spawn_tickets_generation(
         let sysp = prompt::build_tickets_system_prompt();
         let userp = prompt::build_tickets_user_prompt(&session, &spec);
 
+        crate::agent::push_app_log("tickets", &format!("llm call start: {sid}"));
         match client.generate_summary(&sysp, &userp).await {
             Ok(text) => {
+                crate::agent::push_app_log("tickets", &format!("llm done: {sid} ({} chars)", text.len()));
                 let parsed = prompt::parse_tickets_response(&text);
                 if parsed.is_empty() {
+                    crate::agent::push_app_log("tickets", &format!("parse empty: {sid}"));
                     let _ = app.emit(
                         EVENT_ERROR,
                         ErrorPayload {
@@ -3650,15 +3653,26 @@ fn spawn_tickets_generation(
                     );
                 } else {
                     let now = chrono::Utc::now().to_rfc3339();
+                    // Ticket ids are primary keys across ALL rounds — prefix
+                    // with the round number so r1's "t1" can't collide with
+                    // r2's "t1" (same class of bug as outline node ids).
+                    let round_prefix = store
+                        .get_current_round(&sid)
+                        .ok()
+                        .flatten()
+                        .map(|r| format!("r{}-", r.number))
+                        .unwrap_or_else(|| "r0-".to_string());
                     // Key → id: use the LLM key (sanitized) as a stable readable id.
                     let ids: Vec<String> = parsed
                         .iter()
                         .enumerate()
                         .map(|(i, t)| {
-                            t.key
+                            let local = t
+                                .key
                                 .clone()
                                 .filter(|k| !k.trim().is_empty())
-                                .unwrap_or_else(|| format!("t{}", i + 1))
+                                .unwrap_or_else(|| format!("t{}", i + 1));
+                            format!("{round_prefix}{local}")
                         })
                         .collect();
                     let mut tickets: Vec<Ticket> = Vec::new();
@@ -3688,26 +3702,47 @@ fn spawn_tickets_generation(
                             created_at: now.clone(),
                         });
                     }
-                    let _ = store.replace_tickets(&sid, &tickets);
-                    let _ = store
-                        .set_session_pipeline_stage(&sid, PipelineStage::TicketsDraft);
-                    log::info!(
-                        "[pipeline] tickets generated: session={} count={}",
-                        sid,
-                        tickets.len()
-                    );
-                    record_activity(
-                        &*store,
-                        Some(&app),
-                        &sid,
-                        "pipeline",
-                        &format!("Tickets 草稿已生成（{} 条），待确认", tickets.len()),
-                        None,
-                        "info",
-                    );
+                    match store.replace_tickets(&sid, &tickets) {
+                        Ok(()) => {
+                            let _ = store
+                                .set_session_pipeline_stage(&sid, PipelineStage::TicketsDraft);
+                            log::info!(
+                                "[pipeline] tickets generated: session={} count={}",
+                                sid,
+                                tickets.len()
+                            );
+                            record_activity(
+                                &*store,
+                                Some(&app),
+                                &sid,
+                                "pipeline",
+                                &format!("Tickets 草稿已生成（{} 条），待确认", tickets.len()),
+                                None,
+                                "info",
+                            );
+                        }
+                        Err(e) => {
+                            // e.g. ticket id PK collision — without this, the
+                            // stage stays tickets_draft with zero tickets and
+                            // the UI looks silently stuck.
+                            crate::agent::push_app_log(
+                                "tickets",
+                                &format!("db write failed: {sid} — {e}"),
+                            );
+                            let _ = app.emit(
+                                EVENT_ERROR,
+                                ErrorPayload {
+                                    session_id: sid.clone(),
+                                    message: format!("tickets 写入失败：{e}"),
+                                    kind: "generation".to_string(),
+                                },
+                            );
+                        }
+                    }
                 }
             }
             Err(e) => {
+                crate::agent::push_app_log("tickets", &format!("llm failed: {sid} — {e}"));
                 let _ = app.emit(
                     EVENT_ERROR,
                     ErrorPayload {
