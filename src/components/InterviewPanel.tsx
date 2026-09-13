@@ -5,6 +5,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { useSessionStore } from "@/store/sessionStore";
 import { InlineQuestionCard } from "./InlineQuestionCard";
+import { OutlinePanel } from "./OutlinePanel";
 import { api } from "@/lib/tauri";
 import { toast } from "sonner";
 
@@ -62,6 +63,7 @@ export function InterviewPanel({ mayComplete }: InterviewPanelProps) {
 
       <ScrollArea className="flex-1">
         <div className="mx-auto max-w-2xl space-y-4 p-4">
+          <OutlinePanel />
           <Section title="待答" icon={<Clock className="h-3.5 w-3.5 text-blue-500" />}>
             {pending.length === 0 ? (
               <EmptyHint text="没有待答问题。答题后右侧原型会由 agent 自动更新。" />

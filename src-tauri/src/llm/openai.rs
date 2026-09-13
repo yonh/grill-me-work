@@ -358,6 +358,7 @@ impl OpenAIClient {
             answer_version: 0,
             display_order,
             message_id: None,
+            outline_node_id: llm_q.node_id.clone(),
         })
     }
 }

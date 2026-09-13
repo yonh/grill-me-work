@@ -14,6 +14,7 @@ export function useSessions() {
     setQuestions,
     setLoading,
     setGenerating,
+    setOutline,
   } = useSessionStore();
 
   const loadQuestions = useCallback(
@@ -25,8 +26,14 @@ export function useSessions() {
         console.error(err);
         toast.error("加载问题失败");
       }
+      try {
+        const outline = await api.getOutline(id);
+        setOutline(outline.status, outline.nodes);
+      } catch (err) {
+        console.error(err);
+      }
     },
-    [setQuestions]
+    [setQuestions, setOutline]
   );
 
   // Load sessions + restore backend "active session" so UI and MCP stay aligned.
@@ -93,7 +100,7 @@ export function useSessions() {
       setQuestions([]);
       setGenerating(true);
       void api.setActiveSession(session.id).catch(() => {});
-      toast.success("已创建会话，正在生成问题...");
+      toast.success("已创建会话，正在生成访谈大纲...");
       return session;
     } catch (err) {
       console.error(err);

@@ -246,12 +246,14 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Write `docs/decisions.md` from confirmed interview decisions.
+/// `outline` is the user-confirmed interview outline — the scope contract.
 pub fn write_decisions_md(
     session_id: &str,
     title: &str,
     role: &str,
     initial_context: Option<&str>,
     decisions: &[crate::model::DecisionEntry],
+    outline: &[crate::model::OutlineNode],
 ) -> std::io::Result<PathBuf> {
     ensure_workspace(session_id)?;
     let docs = session_docs_dir(session_id);
@@ -270,6 +272,29 @@ pub fn write_decisions_md(
         "- **更新时间**: {}\n\n",
         chrono::Utc::now().to_rfc3339()
     ));
+
+    if !outline.is_empty() {
+        md.push_str("## 访谈大纲（用户确认的范围）\n\n");
+        for n in outline {
+            let mark = match n.status {
+                crate::model::OutlineNodeStatus::Covered => "x",
+                crate::model::OutlineNodeStatus::Excluded => "-",
+                crate::model::OutlineNodeStatus::Pending => " ",
+            };
+            let desc = n
+                .description
+                .as_deref()
+                .map(|d| format!(" — {d}"))
+                .unwrap_or_default();
+            let suffix = match n.status {
+                crate::model::OutlineNodeStatus::Excluded => "（已排除）",
+                _ => "",
+            };
+            md.push_str(&format!("- [{mark}] {}{desc}{suffix}\n", n.title));
+        }
+        md.push('\n');
+    }
+
     md.push_str("## 已确认决策\n\n");
     if decisions.is_empty() {
         md.push_str("（暂无）\n");
@@ -337,7 +362,7 @@ mod tests {
             rationale: Some("主要使用场景".into()),
             category: QuestionCategory::Intent,
         }];
-        let p = write_decisions_md(sid, "测试", "pm", Some("上下文"), &decisions).unwrap();
+        let p = write_decisions_md(sid, "测试", "pm", Some("上下文"), &decisions, &[]).unwrap();
         let body = std::fs::read_to_string(p).unwrap();
         assert!(body.contains("目标用户"));
         assert!(body.contains("产品经理"));

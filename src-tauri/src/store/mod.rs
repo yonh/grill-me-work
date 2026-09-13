@@ -60,4 +60,13 @@ pub trait Store: Send + Sync + 'static {
     fn insert_message(&self, msg: &ChatMessage) -> Result<()>;
     fn get_messages(&self, session_id: &str) -> Result<Vec<ChatMessage>>;
     fn add_message_id_to_question(&self, question_id: &str, message_id: &str) -> Result<()>;
+    // Interview outline
+    fn get_outline_nodes(&self, session_id: &str) -> Result<Vec<OutlineNode>>;
+    /// Replace the whole outline for a session (add/edit/delete/reorder/toggle in one call).
+    /// Clears `outline_node_id` on questions pointing at removed nodes.
+    fn replace_outline_nodes(&self, session_id: &str, nodes: &[OutlineNode]) -> Result<()>;
+    fn set_session_outline_status(&self, session_id: &str, status: OutlineStatus) -> Result<()>;
+    /// Skip all ready/stale questions attached to the given outline nodes.
+    fn skip_questions_for_nodes(&self, session_id: &str, node_ids: &[String]) -> Result<()>;
+    fn get_skipped_questions(&self, session_id: &str) -> Result<Vec<Question>>;
 }

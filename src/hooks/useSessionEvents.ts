@@ -1,11 +1,13 @@
 import { useEffect, useRef } from "react";
 import {
+  api,
   onNewQuestion,
   onStaleMarked,
   onSessionComplete as onSessionCompleteEvent,
   onError,
   onBatchStatus,
   onInterviewMayComplete,
+  onOutlineUpdated,
   onChatStream,
   onChatMessageDone,
   onPrototypeStatus,
@@ -33,7 +35,7 @@ export function useSessionEvents(
   onMayComplete?: (sessionId: string) => void,
   onPrototypeReady?: (payload: PrototypeUpdatedInfo) => void
 ) {
-  const { currentSessionId, addQuestion, markStale, setGenerating, setPrototypeGenerating, bumpSessionPrototypeVersion } =
+  const { currentSessionId, addQuestion, markStale, setGenerating, setPrototypeGenerating, setOutline, setQuestions, bumpSessionPrototypeVersion } =
     useSessionStore();
 
   const currentSessionIdRef = useRef(currentSessionId);
@@ -104,6 +106,20 @@ export function useSessionEvents(
       });
       if (cancelled) { u6(); return; }
       unsubs.push(u6);
+
+      const u6b = await onOutlineUpdated(async (payload) => {
+        if (currentSessionIdRef.current === payload.session_id) {
+          setOutline(payload.status, payload.nodes);
+          // Outline edits may skip questions server-side — resync the list.
+          try {
+            setQuestions(await api.getQuestions(payload.session_id));
+          } catch (e) {
+            console.error("refresh questions after outline update", e);
+          }
+        }
+      });
+      if (cancelled) { u6b(); return; }
+      unsubs.push(u6b);
 
       const u7 = await onChatStream((sessionId, delta) => {
         if (currentSessionIdRef.current === sessionId) {

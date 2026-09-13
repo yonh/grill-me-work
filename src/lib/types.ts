@@ -3,6 +3,23 @@ export type QuestionCategory = "intent" | "choice" | "open" | "tradeoff" | "depe
 export type QuestionStatus = "generating" | "ready" | "answered" | "skipped" | "stale";
 export type SessionStatus = "active" | "completed";
 export type BatchStatus = "generating" | "done" | "failed";
+export type OutlineStatus = "none" | "generating" | "draft" | "confirmed";
+export type OutlineNodeStatus = "pending" | "covered" | "excluded";
+
+export interface OutlineNode {
+  id: string;
+  session_id: string;
+  title: string;
+  description?: string;
+  status: OutlineNodeStatus;
+  display_order: number;
+  created_at: string;
+}
+
+export interface OutlineInfo {
+  status: OutlineStatus;
+  nodes: OutlineNode[];
+}
 
 export interface QuestionOption {
   label: string;
@@ -32,6 +49,7 @@ export interface Question {
   display_order: number;
   stale_triggered_by?: string;
   message_id?: string;
+  outline_node_id?: string;
 }
 
 export interface Session {
@@ -42,6 +60,7 @@ export interface Session {
   status: SessionStatus;
   summary?: string;
   prototype_version: number;
+  outline_status: OutlineStatus;
   created_at: string;
   updated_at: string;
 }

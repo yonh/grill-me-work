@@ -1,5 +1,5 @@
-use crate::model::schema::QUESTION_JSON_TEMPLATE;
-use crate::model::{DecisionEntry, Question, Session};
+use crate::model::schema::{OUTLINE_JSON_TEMPLATE, QUESTION_JSON_TEMPLATE};
+use crate::model::{DecisionEntry, OutlineNode, OutlineNodeStatus, Question, Session};
 use crate::llm::openai::{ApiTool, ApiFunction};
 
 /// Build the role-specific directive that guides question direction and depth.
@@ -67,16 +67,19 @@ pub fn build_system_prompt(batch_size: i32, role: &str) -> String {
     format!(
         r#"{role_directive}
 
-你是 grill-me 需求访谈器。基于用户已确认的决策，生成下一批问题。
+你是 grill-me 需求访谈器。基于用户已确认的决策和访谈大纲，生成下一批问题。
 规则：
 1. 每个问题用 <question> 标签包裹，标签内是一个 JSON 对象
-2. 一次生成 {batch_size} 个问题
-3. 基于已确认决策调整后续问题方向，不要重复已问过的
-4. 每题提供 recommended_option 和 rationale
-5. 问题按依赖排序，独立的在前
-6. 不要问代码库能回答的问题
-7. 标签外可以写解释性文字，会被忽略
-8. JSON 必须在单个 <question> 标签内闭合
+2. 一次最多生成 {batch_size} 个问题，可以更少
+3. 如果提供了访谈大纲：只给「待覆盖/进行中」的节点出题，每题必须带 node_id（取节点 id）；大纲之外不要发散
+4. 如果所有节点都已充分覆盖、没有值得追问的空白，返回 0 个问题——这表示建议结束访谈
+5. 基于已确认决策调整后续问题方向，不要重复已问过的
+6. 用户跳过的问题代表不想聊该主题，不要换着花样再问
+7. 每题提供 recommended_option 和 rationale
+8. 问题按依赖排序，独立的在前
+9. 不要问代码库能回答的问题
+10. 标签外可以写解释性文字，会被忽略
+11. JSON 必须在单个 <question> 标签内闭合
 
 JSON Schema:
 {schema}"#,
@@ -86,14 +89,25 @@ JSON Schema:
     )
 }
 
+/// Per-node question stats used to render outline progress in the prompt.
+pub struct NodeStats {
+    pub answered: usize,
+    pub pending: usize,
+}
+
 /// Build the user prompt for a batch.
 /// If `answered_questions` is empty, this is a cold start — include role-specific dimensions.
 /// Otherwise, include the decision summary and last 3 raw answers.
+/// `outline` (with `stats` keyed by node id) scopes generation to uncovered nodes.
+/// `skipped` lists questions the user skipped — negative signal against re-asking.
 pub fn build_user_prompt(
     session: &Session,
     decision_summary: &[DecisionEntry],
     recent_answers: &[Question],
     batch_size: i32,
+    outline: &[OutlineNode],
+    stats: &std::collections::HashMap<String, NodeStats>,
+    skipped: &[Question],
 ) -> String {
     let mut prompt = String::new();
 
@@ -103,6 +117,40 @@ pub fn build_user_prompt(
         if !ctx.is_empty() {
             prompt.push_str(&format!("用户提供的初始上下文：{}\n\n", ctx));
         }
+    }
+
+    if !outline.is_empty() {
+        prompt.push_str("访谈大纲（用户已确认，只能在这些主题内出题）：\n");
+        for node in outline {
+            match node.status {
+                OutlineNodeStatus::Excluded => {
+                    prompt.push_str(&format!("- [{}] {} — 已排除（不要出题）\n", node.id, node.title));
+                }
+                OutlineNodeStatus::Covered => {
+                    prompt.push_str(&format!("- [{}] {} — 已覆盖\n", node.id, node.title));
+                }
+                OutlineNodeStatus::Pending => {
+                    let s = stats.get(&node.id);
+                    let (answered, pending) =
+                        s.map(|s| (s.answered, s.pending)).unwrap_or((0, 0));
+                    let state = if answered + pending == 0 {
+                        "待覆盖".to_string()
+                    } else {
+                        format!("进行中（已答{}题，待答{}题）", answered, pending)
+                    };
+                    let desc = node
+                        .description
+                        .as_deref()
+                        .map(|d| format!("：{}", d))
+                        .unwrap_or_default();
+                    prompt.push_str(&format!(
+                        "- [{}] {}{} — {}\n",
+                        node.id, node.title, desc, state
+                    ));
+                }
+            }
+        }
+        prompt.push_str("请只为「待覆盖/进行中」的节点出题，每题带 node_id。\n\n");
     }
 
     if decision_summary.is_empty() && recent_answers.is_empty() {
@@ -143,9 +191,64 @@ pub fn build_user_prompt(
         }
     }
 
-    prompt.push_str(&format!("请生成下一批 {} 个问题。\n", batch_size));
+    if !skipped.is_empty() {
+        prompt.push_str("用户已跳过的问题（不要换着花样再问相同主题）：\n");
+        for q in skipped.iter().take(8) {
+            prompt.push_str(&format!("- {}\n", q.question));
+        }
+        prompt.push('\n');
+    }
+
+    prompt.push_str(&format!("请生成下一批问题（最多 {} 个；若无值得问的返回 0 个）。\n", batch_size));
 
     prompt
+}
+
+/// Build the system prompt for interview outline generation.
+pub fn build_outline_system_prompt(role: &str) -> String {
+    format!(
+        r#"{role_directive}
+
+你是 grill-me 需求访谈器。先不要出题——为这个项目生成一份「访谈大纲」：把要厘清的内容拆成 5-9 个主题节点，每个节点是一个问题域。
+规则：
+1. 输出一个 <outline> 标签，标签内是单个 JSON 对象
+2. 节点按优先级排序：先目标与边界，后细节
+3. 节点要贴合这个项目的实际情况，不要照搬模板凑数
+4. description 一句话说明这个节点要确认什么
+5. 不要输出问题本身，只输出大纲
+6. JSON 必须在单个 <outline> 标签内闭合
+
+JSON Schema:
+{schema}"#,
+        role_directive = build_role_directive(role),
+        schema = OUTLINE_JSON_TEMPLATE,
+    )
+}
+
+/// Build the user prompt for interview outline generation.
+pub fn build_outline_user_prompt(session: &Session) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(&format!("项目主题：{}\n", session.title));
+    if let Some(ctx) = &session.initial_context {
+        if !ctx.is_empty() {
+            prompt.push_str(&format!("用户提供的初始上下文：{}\n", ctx));
+        }
+    }
+    prompt.push_str("\n请生成访谈大纲。\n");
+    prompt
+}
+
+/// Parse an LLM outline response: JSON inside <outline>...</outline>, or raw JSON fallback.
+pub fn parse_outline_response(text: &str) -> Vec<crate::model::schema::LlmOutlineNodeJson> {
+    let json_str = if let (Some(start), Some(end)) = (text.find("<outline>"), text.rfind("</outline>")) {
+        &text[start + "<outline>".len()..end]
+    } else {
+        text.trim()
+    };
+    serde_json::from_str::<crate::model::schema::LlmOutlineJson>(json_str.trim())
+        .ok()
+        .and_then(|o| o.nodes)
+        .unwrap_or_default()
 }
 
 /// Build the system prompt for the session summary generation.

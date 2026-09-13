@@ -14,6 +14,8 @@ import type {
   IterationGraph,
   TimelineCommit,
   GitStatus,
+  OutlineInfo,
+  OutlineNode,
 } from "./types";
 
 export const api = {
@@ -32,6 +34,17 @@ export const api = {
   dismissStale: (questionId: string) => invoke<void>("dismiss_stale", { questionId }),
   finishSession: (sessionId: string) =>
     invoke<[DecisionEntry[], string]>("finish_session", { sessionId }),
+  getOutline: (sessionId: string) => invoke<OutlineInfo>("get_outline", { sessionId }),
+  generateOutline: (sessionId: string) =>
+    invoke<void>("generate_outline", { sessionId }),
+  saveOutline: (sessionId: string, nodes: OutlineNode[]) =>
+    invoke<void>("save_outline", { sessionId, nodes }),
+  confirmOutline: (sessionId: string) =>
+    invoke<void>("confirm_outline", { sessionId }),
+  dismissOutline: (sessionId: string) =>
+    invoke<void>("dismiss_outline", { sessionId }),
+  requestBatch: (sessionId: string) =>
+    invoke<void>("request_batch", { sessionId }),
   exportSession: (sessionId: string, format: "md" | "json") =>
     invoke<string>("export_session", { sessionId, format }),
   generatePrototype: (sessionId: string, feedback?: string) =>
@@ -137,6 +150,14 @@ export function onBatchStatus(
 export function onInterviewMayComplete(cb: (session_id: string) => void): Promise<UnlistenFn> {
   return listen<{ session_id: string }>("interview_may_complete", (e) => {
     cb(e.payload.session_id);
+  });
+}
+
+export function onOutlineUpdated(
+  cb: (payload: OutlineInfo & { session_id: string }) => void
+): Promise<UnlistenFn> {
+  return listen<OutlineInfo & { session_id: string }>("outline_updated", (e) => {
+    cb(e.payload);
   });
 }
 

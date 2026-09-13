@@ -1,4 +1,4 @@
-use crate::model::Question;
+use crate::model::{OutlineNode, Question};
 use serde::Serialize;
 
 pub const EVENT_NEW_QUESTION: &str = "new_question";
@@ -13,6 +13,7 @@ pub const EVENT_GRAPH_PROGRESS: &str = "graph_progress";
 pub const EVENT_GRAPH_NODE_STATUS: &str = "graph_node_status";
 pub const EVENT_TIMELINE_UPDATED: &str = "timeline_updated";
 pub const EVENT_ACTIVE_SESSION: &str = "active_session_changed";
+pub const EVENT_OUTLINE_UPDATED: &str = "outline_updated";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NewQuestionPayload {
@@ -108,4 +109,12 @@ pub struct TimelineUpdatedPayload {
 pub struct ActiveSessionPayload {
     pub session_id: Option<String>,
     pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OutlineUpdatedPayload {
+    pub session_id: String,
+    /// none | generating | draft | confirmed
+    pub status: String,
+    pub nodes: Vec<OutlineNode>,
 }

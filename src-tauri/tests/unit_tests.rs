@@ -453,6 +453,17 @@ mod tests {
         fn insert_message(&self, _msg: &ChatMessage) -> Result<()> { Ok(()) }
         fn get_messages(&self, _session_id: &str) -> Result<Vec<ChatMessage>> { Ok(vec![]) }
         fn add_message_id_to_question(&self, _question_id: &str, _message_id: &str) -> Result<()> { Ok(()) }
+        fn get_outline_nodes(&self, _session_id: &str) -> Result<Vec<OutlineNode>> { Ok(vec![]) }
+        fn replace_outline_nodes(&self, _session_id: &str, _nodes: &[OutlineNode]) -> Result<()> { Ok(()) }
+        fn set_session_outline_status(&self, _session_id: &str, _status: OutlineStatus) -> Result<()> { Ok(()) }
+        fn skip_questions_for_nodes(&self, _session_id: &str, _node_ids: &[String]) -> Result<()> { Ok(()) }
+        fn get_skipped_questions(&self, session_id: &str) -> Result<Vec<Question>> {
+            Ok(self.questions.lock().unwrap()
+                .values()
+                .filter(|q| q.session_id == session_id && q.status == QuestionStatus::Skipped)
+                .cloned()
+                .collect())
+        }
     }
 
     // ============ Stale marking / dependency graph tests ============
@@ -475,6 +486,7 @@ mod tests {
             answer_version: 0,
             display_order: order,
             message_id: None,
+            outline_node_id: None,
         }
     }
 
@@ -582,6 +594,7 @@ mod tests {
             status: SessionStatus::Completed,
             summary: None,
             prototype_version: 0,
+            outline_status: OutlineStatus::None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };
@@ -630,6 +643,7 @@ mod tests {
             status: SessionStatus::Completed,
             summary: None,
             prototype_version: 0,
+            outline_status: OutlineStatus::None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };
@@ -673,6 +687,7 @@ mod tests {
             status: SessionStatus::Completed,
             summary: None,
             prototype_version: 0,
+            outline_status: OutlineStatus::None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };
@@ -703,6 +718,7 @@ mod tests {
             status: SessionStatus::Completed,
             summary: None,
             prototype_version: 0,
+            outline_status: OutlineStatus::None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             updated_at: "2026-07-01T00:00:00Z".to_string(),
         };

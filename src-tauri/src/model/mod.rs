@@ -13,8 +13,84 @@ pub struct Session {
     pub summary: Option<String>,
     /// Multi-file prototype lives on disk; this is only a version counter.
     pub prototype_version: i32,
+    /// Interview outline lifecycle: none | generating | draft | confirmed
+    pub outline_status: OutlineStatus,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutlineStatus {
+    /// No outline — legacy free-running interview.
+    None,
+    /// LLM is generating the outline.
+    Generating,
+    /// Outline generated, waiting for user confirmation.
+    Draft,
+    /// User confirmed; question batches are scoped to uncovered nodes.
+    Confirmed,
+}
+
+impl OutlineStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutlineStatus::None => "none",
+            OutlineStatus::Generating => "generating",
+            OutlineStatus::Draft => "draft",
+            OutlineStatus::Confirmed => "confirmed",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "generating" => OutlineStatus::Generating,
+            "draft" => OutlineStatus::Draft,
+            "confirmed" => OutlineStatus::Confirmed,
+            _ => OutlineStatus::None,
+        }
+    }
+}
+
+/// One topic node in the interview outline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutlineNode {
+    pub id: String,
+    pub session_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: OutlineNodeStatus,
+    pub display_order: i32,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutlineNodeStatus {
+    /// Still needs questions.
+    Pending,
+    /// Sufficiently covered (auto when it has answers and no pending questions, or set by user).
+    Covered,
+    /// User unchecked it — never generate questions for it.
+    Excluded,
+}
+
+impl OutlineNodeStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutlineNodeStatus::Pending => "pending",
+            OutlineNodeStatus::Covered => "covered",
+            OutlineNodeStatus::Excluded => "excluded",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "covered" => OutlineNodeStatus::Covered,
+            "excluded" => OutlineNodeStatus::Excluded,
+            _ => OutlineNodeStatus::Pending,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +134,8 @@ pub struct Question {
     pub answer_version: u32,
     pub display_order: i32,
     pub message_id: Option<String>,
+    /// Outline node this question belongs to (None = unscoped / legacy).
+    pub outline_node_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

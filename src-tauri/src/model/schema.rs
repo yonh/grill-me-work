@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 /// JSON schema description used in the LLM prompt to constrain output shape.
 /// This is embedded as text in the system prompt (not sent as a formal JSON Schema).
-pub const QUESTION_JSON_TEMPLATE: &str = r#"{"id":"q_xxx","type":"choice|multi|open","category":"intent|choice|open|tradeoff|dependency","question":"题干","context":"上下文说明","options":[{"label":"选项A","description":"说明"}],"recommended_option":"选项A","rationale":"推荐理由","depends_on":["q_xxx"]}"#;
+pub const QUESTION_JSON_TEMPLATE: &str = r#"{"id":"q_xxx","type":"choice|multi|open","category":"intent|choice|open|tradeoff|dependency","question":"题干","context":"上下文说明","options":[{"label":"选项A","description":"说明"}],"recommended_option":"选项A","rationale":"推荐理由","depends_on":["q_xxx"],"node_id":"n1"}"#;
+
+/// JSON schema for the interview outline response (<outline> tag or raw JSON).
+pub const OUTLINE_JSON_TEMPLATE: &str = r#"{"nodes":[{"id":"n1","title":"主题名","description":"这个节点要确认什么（一句话）"}]}"#;
 
 /// A loose schema struct used to parse the JSON inside <question> tags from the LLM.
 /// Fields are optional to be tolerant of partial output.
@@ -18,6 +21,20 @@ pub struct LlmQuestionJson {
     pub recommended_option: Option<String>,
     pub rationale: Option<String>,
     pub depends_on: Option<Vec<String>>,
+    pub node_id: Option<String>,
+}
+
+/// Loose schema for the outline JSON produced by the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmOutlineJson {
+    pub nodes: Option<Vec<LlmOutlineNodeJson>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmOutlineNodeJson {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

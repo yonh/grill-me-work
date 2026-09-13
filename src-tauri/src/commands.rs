@@ -390,6 +390,126 @@ pub async fn save_settings(
         .map_err(|_| "scheduler actor dropped reply".to_string())?
 }
 
+// --- Interview outline ---
+
+#[tauri::command]
+pub async fn get_outline(
+    session_id: String,
+    state: State<'_, ActorHandle>,
+) -> Result<crate::scheduler::OutlineInfo, String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::GetOutline { session_id, reply })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn generate_outline(
+    session_id: String,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::GenerateOutline {
+            session_id,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn save_outline(
+    session_id: String,
+    nodes: Vec<OutlineNode>,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::SaveOutline {
+            session_id,
+            nodes,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn confirm_outline(
+    session_id: String,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::ConfirmOutline {
+            session_id,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+#[tauri::command]
+pub async fn dismiss_outline(
+    session_id: String,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::DismissOutline {
+            session_id,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
+/// Ask for one more question batch even after the interview saturated.
+#[tauri::command]
+pub async fn request_batch(
+    session_id: String,
+    state: State<'_, ActorHandle>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    state
+        .tx
+        .send(SchedulerMsg::RequestBatch {
+            session_id,
+            app_handle,
+            reply,
+        })
+        .await
+        .map_err(|_| "scheduler actor disconnected".to_string())?;
+    rx.await
+        .map_err(|_| "scheduler actor dropped reply".to_string())?
+}
+
 // --- Iteration graph / timeline ---
 
 #[tauri::command]

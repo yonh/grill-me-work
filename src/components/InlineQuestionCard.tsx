@@ -25,7 +25,10 @@ interface InlineQuestionCardProps {
 }
 
 export function InlineQuestionCard({ question }: InlineQuestionCardProps) {
-  const { currentSessionId, updateQuestion } = useSessionStore();
+  const { currentSessionId, updateQuestion, outlineNodes } = useSessionStore();
+  const nodeTitle = question.outline_node_id
+    ? outlineNodes.find((n) => n.id === question.outline_node_id)?.title
+    : undefined;
   const [expanded, setExpanded] = useState(false);
   const [multiSelected, setMultiSelected] = useState<string[]>([]);
   const [openText, setOpenText] = useState("");
@@ -141,6 +144,9 @@ export function InlineQuestionCard({ question }: InlineQuestionCardProps) {
             {question.rationale && (
               <p className="text-xs text-muted-foreground leading-snug break-words">{question.rationale}</p>
             )}
+            {nodeTitle && (
+              <p className="text-[10px] text-primary/70">{nodeTitle}</p>
+            )}
           </div>
           <Badge variant="outline" className="mt-0.5 shrink-0 text-[10px]">
             {question.q_type === "choice" ? "单选" : question.q_type === "multi" ? "多选" : "文本"}
@@ -168,6 +174,11 @@ export function InlineQuestionCard({ question }: InlineQuestionCardProps) {
               <Badge variant="outline" className="text-[10px]">
                 {question.q_type === "choice" ? "单选" : question.q_type === "multi" ? "多选" : "文本"}
               </Badge>
+              {nodeTitle && (
+                <Badge variant="secondary" className="text-[10px]">
+                  {nodeTitle}
+                </Badge>
+              )}
             </div>
             <p className="text-sm font-semibold leading-snug">{question.question}</p>
             {question.rationale && (

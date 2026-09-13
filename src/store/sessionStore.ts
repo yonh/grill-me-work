@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Session, Question, Settings } from "@/lib/types";
+import type { Session, Question, Settings, OutlineNode, OutlineStatus } from "@/lib/types";
 
 interface SessionStore {
   sessions: Session[];
@@ -9,6 +9,8 @@ interface SessionStore {
   isLoading: boolean;
   isGenerating: boolean;
   isPrototypeGenerating: boolean;
+  outlineStatus: OutlineStatus;
+  outlineNodes: OutlineNode[];
 
   setSessions: (sessions: Session[]) => void;
   setCurrentSession: (id: string | null) => void;
@@ -22,6 +24,7 @@ interface SessionStore {
   setLoading: (loading: boolean) => void;
   setGenerating: (generating: boolean) => void;
   setPrototypeGenerating: (generating: boolean) => void;
+  setOutline: (status: OutlineStatus, nodes: OutlineNode[]) => void;
   bumpSessionPrototypeVersion: (sessionId: string, version: number) => void;
 }
 
@@ -33,10 +36,13 @@ export const useSessionStore = create<SessionStore>((set) => ({
   isLoading: false,
   isGenerating: false,
   isPrototypeGenerating: false,
+  outlineStatus: "none",
+  outlineNodes: [],
 
   setSessions: (sessions) => set({ sessions }),
 
-  setCurrentSession: (id) => set({ currentSessionId: id, questions: [] }),
+  setCurrentSession: (id) =>
+    set({ currentSessionId: id, questions: [], outlineStatus: "none", outlineNodes: [] }),
 
   addSession: (session) =>
     set((state) => ({ sessions: [session, ...state.sessions] })),
@@ -81,6 +87,8 @@ export const useSessionStore = create<SessionStore>((set) => ({
   setGenerating: (isGenerating) => set({ isGenerating }),
 
   setPrototypeGenerating: (isPrototypeGenerating) => set({ isPrototypeGenerating }),
+
+  setOutline: (outlineStatus, outlineNodes) => set({ outlineStatus, outlineNodes }),
 
   bumpSessionPrototypeVersion: (sessionId, version) =>
     set((state) => ({

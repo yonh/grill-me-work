@@ -104,6 +104,18 @@ impl SqliteStore {
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+
+            CREATE TABLE IF NOT EXISTS outline_nodes (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                display_order INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_outline_nodes_session ON outline_nodes(session_id);
             "#,
         )?;
 
@@ -190,6 +202,48 @@ impl SqliteStore {
             )?;
         }
 
+        // Migration: outline_status column on sessions
+        let has_outline_status: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })?;
+            let mut found = false;
+            for row in rows {
+                if row? == "outline_status" {
+                    found = true;
+                }
+            }
+            found
+        };
+        if !has_outline_status {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN outline_status TEXT NOT NULL DEFAULT 'none';",
+            )?;
+        }
+
+        // Migration: outline_node_id column on questions
+        let has_outline_node_id: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(questions)")?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })?;
+            let mut found = false;
+            for row in rows {
+                if row? == "outline_node_id" {
+                    found = true;
+                }
+            }
+            found
+        };
+        if !has_outline_node_id {
+            conn.execute_batch(
+                "ALTER TABLE questions ADD COLUMN outline_node_id TEXT;",
+            )?;
+        }
+
         Ok(())
     }
 }
@@ -203,6 +257,7 @@ fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         status: SessionStatus::from_str(row.get::<_, String>("status")?.as_str()),
         summary: row.get("summary")?,
         prototype_version: row.get("prototype_version")?,
+        outline_status: OutlineStatus::from_str(row.get::<_, String>("outline_status")?.as_str()),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -237,6 +292,7 @@ fn row_to_question(row: &rusqlite::Row) -> rusqlite::Result<Question> {
         answer_version: row.get("answer_version")?,
         display_order: row.get("display_order")?,
         message_id: row.get("message_id")?,
+        outline_node_id: row.get("outline_node_id")?,
     })
 }
 
@@ -261,6 +317,7 @@ impl Store for SqliteStore {
     fn delete_session(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM decision_summary WHERE session_id = ?1", params![id])?;
+        conn.execute("DELETE FROM outline_nodes WHERE session_id = ?1", params![id])?;
         conn.execute("DELETE FROM questions WHERE session_id = ?1", params![id])?;
         conn.execute("DELETE FROM batches WHERE session_id = ?1", params![id])?;
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -270,7 +327,7 @@ impl Store for SqliteStore {
     fn get_sessions(&self) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
-            conn.prepare("SELECT id, title, initial_context, role, status, summary, prototype_version, created_at, updated_at FROM sessions ORDER BY created_at DESC")?;
+            conn.prepare("SELECT id, title, initial_context, role, status, summary, prototype_version, outline_status, created_at, updated_at FROM sessions ORDER BY created_at DESC")?;
         let rows = stmt.query_map([], row_to_session)?;
         let mut sessions = Vec::new();
         for row in rows {
@@ -282,7 +339,7 @@ impl Store for SqliteStore {
     fn get_session(&self, id: &str) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, initial_context, role, status, summary, prototype_version, created_at, updated_at FROM sessions WHERE id = ?1",
+            "SELECT id, title, initial_context, role, status, summary, prototype_version, outline_status, created_at, updated_at FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_session)?;
         if let Some(row) = rows.next() {
@@ -295,7 +352,7 @@ impl Store for SqliteStore {
     fn get_questions(&self, session_id: &str) -> Result<Vec<Question>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id FROM questions WHERE session_id = ?1 ORDER BY display_order ASC",
+            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id FROM questions WHERE session_id = ?1 ORDER BY display_order ASC",
         )?;
         let rows = stmt.query_map(params![session_id], row_to_question)?;
         let mut questions = Vec::new();
@@ -314,7 +371,7 @@ impl Store for SqliteStore {
             None => None,
         };
         conn.execute(
-            "INSERT OR REPLACE INTO questions (id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT OR REPLACE INTO questions (id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 q.id,
                 q.session_id,
@@ -332,6 +389,7 @@ impl Store for SqliteStore {
                 q.answer_version,
                 q.display_order,
                 q.message_id,
+                q.outline_node_id,
             ],
         )?;
         Ok(())
@@ -378,7 +436,7 @@ impl Store for SqliteStore {
     fn get_answered_questions(&self, session_id: &str) -> Result<Vec<Question>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id FROM questions WHERE session_id = ?1 AND status = 'answered' ORDER BY display_order ASC",
+            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id FROM questions WHERE session_id = ?1 AND status = 'answered' ORDER BY display_order ASC",
         )?;
         let rows = stmt.query_map(params![session_id], row_to_question)?;
         let mut questions = Vec::new();
@@ -718,7 +776,7 @@ impl Store for SqliteStore {
     fn get_question(&self, id: &str) -> Result<Option<Question>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id FROM questions WHERE id = ?1",
+            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id FROM questions WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_question)?;
         if let Some(row) = rows.next() {
@@ -793,5 +851,100 @@ impl Store for SqliteStore {
             params![message_id, question_id],
         )?;
         Ok(())
+    }
+
+    fn get_outline_nodes(&self, session_id: &str) -> Result<Vec<OutlineNode>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, title, description, status, display_order, created_at FROM outline_nodes WHERE session_id = ?1 ORDER BY display_order ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(OutlineNode {
+                id: row.get("id")?,
+                session_id: row.get("session_id")?,
+                title: row.get("title")?,
+                description: row.get("description")?,
+                status: OutlineNodeStatus::from_str(row.get::<_, String>("status")?.as_str()),
+                display_order: row.get("display_order")?,
+                created_at: row.get("created_at")?,
+            })
+        })?;
+        let mut nodes = Vec::new();
+        for row in rows {
+            nodes.push(row?);
+        }
+        Ok(nodes)
+    }
+
+    fn replace_outline_nodes(&self, session_id: &str, nodes: &[OutlineNode]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM outline_nodes WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        for node in nodes {
+            conn.execute(
+                "INSERT INTO outline_nodes (id, session_id, title, description, status, display_order, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    node.id,
+                    session_id,
+                    node.title,
+                    node.description,
+                    node.status.as_str(),
+                    node.display_order,
+                    node.created_at,
+                ],
+            )?;
+        }
+        // Orphan questions whose node was removed
+        conn.execute(
+            "UPDATE questions SET outline_node_id = NULL WHERE session_id = ?1 AND outline_node_id IS NOT NULL AND outline_node_id NOT IN (SELECT id FROM outline_nodes WHERE session_id = ?1)",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    fn set_session_outline_status(&self, session_id: &str, status: OutlineStatus) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE sessions SET outline_status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status.as_str(), now, session_id],
+        )?;
+        Ok(())
+    }
+
+    fn skip_questions_for_nodes(&self, session_id: &str, node_ids: &[String]) -> Result<()> {
+        if node_ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        let placeholders = node_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE questions SET status = 'skipped' WHERE session_id = ? AND status IN ('ready', 'stale') AND outline_node_id IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut param_values: Vec<rusqlite::types::Value> =
+            vec![rusqlite::types::Value::from(session_id.to_string())];
+        param_values.extend(
+            node_ids
+                .iter()
+                .map(|id| rusqlite::types::Value::from(id.clone())),
+        );
+        stmt.execute(rusqlite::params_from_iter(param_values))?;
+        Ok(())
+    }
+
+    fn get_skipped_questions(&self, session_id: &str) -> Result<Vec<Question>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, batch_id, q_type, category, question, context, options_json, recommended_option, rationale, depends_on_json, status, answer_json, answer_version, display_order, message_id, outline_node_id FROM questions WHERE session_id = ?1 AND status = 'skipped' ORDER BY display_order ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], row_to_question)?;
+        let mut questions = Vec::new();
+        for row in rows {
+            questions.push(row?);
+        }
+        Ok(questions)
     }
 }

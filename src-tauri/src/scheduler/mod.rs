@@ -104,6 +104,42 @@ pub enum SchedulerMsg {
         session_id: String,
         app_handle: AppHandle,
     },
+    // --- Interview outline ---
+    GetOutline {
+        session_id: String,
+        reply: oneshot::Sender<Result<OutlineInfo, String>>,
+    },
+    GenerateOutline {
+        session_id: String,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    SaveOutline {
+        session_id: String,
+        nodes: Vec<OutlineNode>,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ConfirmOutline {
+        session_id: String,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    DismissOutline {
+        session_id: String,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Manually request one more question batch (clears the saturated flag).
+    RequestBatch {
+        session_id: String,
+        app_handle: AppHandle,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Internal: outline generation task finished (clears outline_generating).
+    OutlineDone {
+        session_id: String,
+    },
     // --- Iteration graph / timeline ---
     GetTimeline {
         session_id: String,
@@ -162,6 +198,18 @@ pub enum SchedulerMsg {
 struct SessionState {
     active_batches: i32,
     last_generation_time: Option<std::time::Instant>,
+    /// The LLM returned 0 questions — interview is saturated; stop auto-refilling
+    /// until the user changes the outline or explicitly requests more.
+    saturated: bool,
+    /// An outline generation task is in flight (in-memory; clears on OutlineDone).
+    outline_generating: bool,
+}
+
+/// Outline info returned to the frontend.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OutlineInfo {
+    pub status: OutlineStatus,
+    pub nodes: Vec<OutlineNode>,
 }
 
 /// The scheduler actor's shared state.
@@ -387,9 +435,13 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                     );
                 }
 
+                // A batch just finished — node coverage may have changed.
+                refresh_outline_coverage(&*store, &session_id, &app_handle);
+
                 // If LLM returned 0 questions, it may indicate the interview is complete
                 if questions_generated == 0 {
-                    log::info!("[scheduler] BatchDone: 0 questions generated, emitting interview_may_complete");
+                    log::info!("[scheduler] BatchDone: 0 questions generated, marking saturated + emitting interview_may_complete");
+                    state.get_or_create(&session_id).saturated = true;
                     let _ = app_handle.emit(
                         "interview_may_complete",
                         serde_json::json!({ "session_id": session_id }),
@@ -464,6 +516,146 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                 app_handle,
             } => {
                 log::info!("[scheduler] StartInitialBatch: session={}", session_id);
+                // Outline-first flow: a fresh session generates the interview
+                // outline and waits for user confirmation before any questions.
+                let outline_status = store
+                    .get_session(&session_id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.outline_status)
+                    .unwrap_or(OutlineStatus::None);
+                match outline_status {
+                    OutlineStatus::None => {
+                        state.get_or_create(&session_id).outline_generating = true;
+                        spawn_outline_generation(
+                            store.clone(),
+                            &session_id,
+                            &app_handle,
+                            tx.clone(),
+                        );
+                    }
+                    OutlineStatus::Confirmed => {
+                        check_water_levels_and_trigger(
+                            store.clone(),
+                            &mut state,
+                            &session_id,
+                            &[],
+                            &app_handle,
+                            tx.clone(),
+                        );
+                    }
+                    // generating / draft → wait for the user
+                    _ => {}
+                }
+            }
+            SchedulerMsg::GetOutline { session_id, reply } => {
+                let status = store
+                    .get_session(&session_id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.outline_status)
+                    .unwrap_or(OutlineStatus::None);
+                let nodes = store.get_outline_nodes(&session_id).unwrap_or_default();
+                let _ = reply.send(Ok(OutlineInfo { status, nodes }));
+            }
+            SchedulerMsg::GenerateOutline {
+                session_id,
+                app_handle,
+                reply,
+            } => {
+                log::info!("[scheduler] GenerateOutline: session={}", session_id);
+                // Skip only while a task is actually in flight (in-memory flag —
+                // a stale 'generating' status after restart stays retryable).
+                let in_flight = state.get_or_create(&session_id).outline_generating;
+                if !in_flight {
+                    state.get_or_create(&session_id).outline_generating = true;
+                    spawn_outline_generation(
+                        store.clone(),
+                        &session_id,
+                        &app_handle,
+                        tx.clone(),
+                    );
+                }
+                let _ = reply.send(Ok(()));
+            }
+            SchedulerMsg::OutlineDone { session_id } => {
+                state.get_or_create(&session_id).outline_generating = false;
+            }
+            SchedulerMsg::SaveOutline {
+                session_id,
+                nodes,
+                app_handle,
+                reply,
+            } => {
+                log::info!("[scheduler] SaveOutline: session={}, {} nodes", session_id, nodes.len());
+                let result = handle_save_outline(
+                    store.clone(),
+                    &mut state,
+                    &session_id,
+                    nodes,
+                    &app_handle,
+                    tx.clone(),
+                );
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::ConfirmOutline {
+                session_id,
+                app_handle,
+                reply,
+            } => {
+                log::info!("[scheduler] ConfirmOutline: session={}", session_id);
+                let result = store
+                    .set_session_outline_status(&session_id, OutlineStatus::Confirmed)
+                    .map_err(|e| e.to_string());
+                if result.is_ok() {
+                    state.get_or_create(&session_id).saturated = false;
+                    emit_outline_updated(&*store, &session_id, &app_handle);
+                    // Kick off the first scoped batch
+                    check_water_levels_and_trigger(
+                        store.clone(),
+                        &mut state,
+                        &session_id,
+                        &[],
+                        &app_handle,
+                        tx.clone(),
+                    );
+                }
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::DismissOutline {
+                session_id,
+                app_handle,
+                reply,
+            } => {
+                log::info!("[scheduler] DismissOutline: session={} → free mode", session_id);
+                // Free mode: no outline scoping, but saturation still applies.
+                let result = store
+                    .replace_outline_nodes(&session_id, &[])
+                    .and_then(|_| {
+                        store.set_session_outline_status(&session_id, OutlineStatus::Confirmed)
+                    })
+                    .map_err(|e| e.to_string());
+                if result.is_ok() {
+                    state.get_or_create(&session_id).saturated = false;
+                    emit_outline_updated(&*store, &session_id, &app_handle);
+                    check_water_levels_and_trigger(
+                        store.clone(),
+                        &mut state,
+                        &session_id,
+                        &[],
+                        &app_handle,
+                        tx.clone(),
+                    );
+                }
+                let _ = reply.send(result);
+            }
+            SchedulerMsg::RequestBatch {
+                session_id,
+                app_handle,
+                reply,
+            } => {
+                log::info!("[scheduler] RequestBatch: session={}", session_id);
+                state.get_or_create(&session_id).saturated = false;
                 spawn_batch_generation(
                     store.clone(),
                     &mut state,
@@ -472,6 +664,7 @@ pub async fn run_actor(store: Arc<dyn Store>, mut rx: mpsc::Receiver<SchedulerMs
                     &app_handle,
                     tx.clone(),
                 );
+                let _ = reply.send(Ok(()));
             }
             SchedulerMsg::GetTimeline { session_id, reply } => {
                 let dir = crate::workspace::session_workspace_dir(&session_id);
@@ -669,6 +862,13 @@ fn msg_name(msg: &SchedulerMsg) -> &'static str {
         SchedulerMsg::SaveIterationGraph { .. } => "SaveIterationGraph",
         SchedulerMsg::RunIterationGraph { .. } => "RunIterationGraph",
         SchedulerMsg::CancelIterationGraph { .. } => "CancelIterationGraph",
+        SchedulerMsg::GetOutline { .. } => "GetOutline",
+        SchedulerMsg::GenerateOutline { .. } => "GenerateOutline",
+        SchedulerMsg::SaveOutline { .. } => "SaveOutline",
+        SchedulerMsg::ConfirmOutline { .. } => "ConfirmOutline",
+        SchedulerMsg::DismissOutline { .. } => "DismissOutline",
+        SchedulerMsg::RequestBatch { .. } => "RequestBatch",
+        SchedulerMsg::OutlineDone { .. } => "OutlineDone",
     }
 }
 
@@ -687,6 +887,7 @@ fn handle_create_session(
         status: SessionStatus::Active,
         summary: None,
         prototype_version: 0,
+        outline_status: OutlineStatus::None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -754,7 +955,10 @@ fn handle_answer_question(
         log::info!("[answer] No dependents to mark stale");
     }
 
-    // 5. Check water levels → maybe trigger new batch
+    // 5. Refresh outline coverage (an answer may complete a node)
+    refresh_outline_coverage(&*store, session_id, app_handle);
+
+    // 6. Check water levels → maybe trigger new batch
     check_water_levels_and_trigger(
         store,
         state,
@@ -778,6 +982,8 @@ fn handle_skip_question(
     store
         .update_question_status(question_id, QuestionStatus::Skipped)
         .map_err(|e| e.to_string())?;
+
+    refresh_outline_coverage(&*store, session_id, app_handle);
 
     // Check water levels → maybe trigger new batch
     check_water_levels_and_trigger(
@@ -804,6 +1010,9 @@ fn handle_regenerate_stale(
     store
         .mark_stale(question_ids)
         .map_err(|e| e.to_string())?;
+
+    // User explicitly wants regeneration — clear the saturation stop.
+    state.get_or_create(session_id).saturated = false;
 
     // Trigger a new batch generation
     check_water_levels_and_trigger(store, state, session_id, question_ids, app_handle, tx);
@@ -1281,12 +1490,14 @@ async fn handle_generate_prototype(
     }
 
     // Sync structured spec for the agent to read
+    let outline_nodes = store.get_outline_nodes(session_id).unwrap_or_default();
     let _ = crate::workspace::write_decisions_md(
         session_id,
         &session.title,
         &session.role,
         session.initial_context.as_deref(),
         &decision_summary,
+        &outline_nodes,
     );
     let _ = crate::workspace::write_intent_md(
         session_id,
@@ -1751,6 +1962,7 @@ async fn handle_send_message(
                                     answer_version: 0,
                                     display_order: display_order_offset + i as i32,
                                     message_id: None, // will be set after message is saved
+                                    outline_node_id: None, // chat-tool questions are unscoped
                                 };
 
                                 if let Err(e) = store.insert_question(&question) {
@@ -1860,6 +2072,38 @@ fn check_water_levels_and_trigger(
         }
     };
 
+    // --- Outline gates ---
+    let session = match store.get_session(session_id) {
+        Ok(Some(s)) => s,
+        _ => return,
+    };
+    match session.outline_status {
+        // Outline still generating or waiting for user confirmation — hold all batches.
+        OutlineStatus::Generating | OutlineStatus::Draft => {
+            log::info!("[water] session={}: SKIP (outline_status={})", session_id, session.outline_status.as_str());
+            return;
+        }
+        _ => {}
+    }
+
+    let session_state = state.get_or_create(session_id);
+    if session_state.saturated {
+        log::info!("[water] session={}: SKIP (saturated — LLM signalled completion)", session_id);
+        return;
+    }
+
+    if session.outline_status == OutlineStatus::Confirmed {
+        let nodes = store.get_outline_nodes(session_id).unwrap_or_default();
+        if !nodes.is_empty() && !nodes.iter().any(|n| n.status == OutlineNodeStatus::Pending) {
+            log::info!("[water] session={}: STOP (all outline nodes covered/excluded)", session_id);
+            let _ = app_handle.emit(
+                "interview_may_complete",
+                serde_json::json!({ "session_id": session_id }),
+            );
+            return;
+        }
+    }
+
     let inventory = store.count_ready_questions(session_id).unwrap_or(0);
     let low_water = settings.batch_size / 2;
     let high_water = 2 * settings.batch_size;
@@ -1951,9 +2195,39 @@ fn spawn_batch_generation(
     let decision_summary = store.get_decision_summary(session_id).unwrap_or_default();
     let answered = store.get_answered_questions(session_id).unwrap_or_default();
 
+    // Outline scoping: only when the user confirmed an outline.
+    let outline_nodes: Vec<OutlineNode> = if session.outline_status == OutlineStatus::Confirmed {
+        store.get_outline_nodes(session_id).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let skipped = store.get_skipped_questions(session_id).unwrap_or_default();
+
+    // Per-node stats for the prompt + valid node ids for node_id validation.
+    let all_questions = store.get_questions(session_id).unwrap_or_default();
+    let mut node_stats: std::collections::HashMap<String, prompt::NodeStats> =
+        std::collections::HashMap::new();
+    for q in &all_questions {
+        if let Some(nid) = &q.outline_node_id {
+            let s = node_stats.entry(nid.clone()).or_insert(prompt::NodeStats {
+                answered: 0,
+                pending: 0,
+            });
+            match q.status {
+                QuestionStatus::Answered | QuestionStatus::Skipped => s.answered += 1,
+                QuestionStatus::Ready | QuestionStatus::Generating | QuestionStatus::Stale => {
+                    s.pending += 1
+                }
+            }
+        }
+    }
+    let valid_node_ids: std::collections::HashSet<String> =
+        outline_nodes.iter().map(|n| n.id.clone()).collect();
+
     log::info!(
-        "[batch] session={}: decision_summary={} entries, answered={} questions, cold_start={}",
-        session_id, decision_summary.len(), answered.len(), decision_summary.is_empty() && answered.is_empty()
+        "[batch] session={}: decision_summary={} entries, answered={} questions, outline_nodes={}, cold_start={}",
+        session_id, decision_summary.len(), answered.len(), outline_nodes.len(),
+        decision_summary.is_empty() && answered.is_empty()
     );
 
     // Create batch record
@@ -1990,8 +2264,15 @@ fn spawn_batch_generation(
 
     // Build prompts
     let system_prompt = prompt::build_system_prompt(settings.batch_size, &session.role);
-    let user_prompt =
-        prompt::build_user_prompt(&session, &decision_summary, &answered, settings.batch_size);
+    let user_prompt = prompt::build_user_prompt(
+        &session,
+        &decision_summary,
+        &answered,
+        settings.batch_size,
+        &outline_nodes,
+        &node_stats,
+        &skipped,
+    );
 
     // Create LLM client
     let client = OpenAIClient::new(
@@ -2037,6 +2318,12 @@ fn spawn_batch_generation(
                 // Override session_id and batch_id (they were set to empty in the parser)
                 q.session_id = session_id_arc.clone().as_ref().clone();
                 q.batch_id = batch_id_arc.clone().as_ref().clone();
+                // Drop node_ids that don't exist in the current outline
+                if let Some(nid) = &q.outline_node_id {
+                    if !valid_node_ids.contains(nid) {
+                        q.outline_node_id = None;
+                    }
+                }
                 let mut offset_guard = display_order_arc.lock().unwrap();
                 q.display_order = *offset_guard;
                 *offset_guard += 1;
@@ -2177,4 +2464,275 @@ fn spawn_batch_generation(
         }).await;
         log::info!("[batch-task] Done: batch_id={}, generated={} questions", batch_id, generated);
     });
+}
+
+// ==================== Interview outline ====================
+
+/// Emit the current outline state (status + nodes) to the frontend.
+fn emit_outline_updated(store: &dyn Store, session_id: &str, app_handle: &AppHandle) {
+    let status = store
+        .get_session(session_id)
+        .ok()
+        .flatten()
+        .map(|s| s.outline_status)
+        .unwrap_or(OutlineStatus::None);
+    let nodes = store.get_outline_nodes(session_id).unwrap_or_default();
+    let _ = app_handle.emit(
+        EVENT_OUTLINE_UPDATED,
+        OutlineUpdatedPayload {
+            session_id: session_id.to_string(),
+            status: status.as_str().to_string(),
+            nodes,
+        },
+    );
+}
+
+/// Auto-mark pending outline nodes as covered once they have at least one
+/// answered question and nothing left pending. Emits outline_updated on change.
+fn refresh_outline_coverage(store: &dyn Store, session_id: &str, app_handle: &AppHandle) {
+    let confirmed = store
+        .get_session(session_id)
+        .ok()
+        .flatten()
+        .map(|s| s.outline_status == OutlineStatus::Confirmed)
+        .unwrap_or(false);
+    if !confirmed {
+        return;
+    }
+    let nodes = match store.get_outline_nodes(session_id) {
+        Ok(n) if !n.is_empty() => n,
+        _ => return,
+    };
+    let questions = store.get_questions(session_id).unwrap_or_default();
+
+    let mut updated = nodes.clone();
+    let mut changed = false;
+    for node in updated.iter_mut() {
+        if node.status != OutlineNodeStatus::Pending {
+            continue;
+        }
+        let mut answered = 0usize;
+        let mut pending = 0usize;
+        for q in &questions {
+            if q.outline_node_id.as_deref() == Some(node.id.as_str()) {
+                match q.status {
+                    QuestionStatus::Answered => answered += 1,
+                    QuestionStatus::Ready
+                    | QuestionStatus::Generating
+                    | QuestionStatus::Stale => pending += 1,
+                    QuestionStatus::Skipped => {}
+                }
+            }
+        }
+        if answered >= 1 && pending == 0 {
+            node.status = OutlineNodeStatus::Covered;
+            changed = true;
+        }
+    }
+
+    if changed {
+        if let Err(e) = store.replace_outline_nodes(session_id, &updated) {
+            log::error!("[outline] coverage update failed: {}", e);
+            return;
+        }
+        log::info!("[outline] session={}: auto-marked covered nodes", session_id);
+        emit_outline_updated(store, session_id, app_handle);
+    }
+}
+
+/// Generate the interview outline via LLM and move the session to `draft`.
+/// On failure the session falls back to `none` so the user can retry or skip.
+fn spawn_outline_generation(
+    store: Arc<dyn Store>,
+    session_id: &str,
+    app_handle: &AppHandle,
+    scheduler_tx: mpsc::Sender<SchedulerMsg>,
+) {
+    let settings = match store.get_all_settings() {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("[outline] Failed to get settings: {}", e);
+            let _ = scheduler_tx.try_send(SchedulerMsg::OutlineDone {
+                session_id: session_id.to_string(),
+            });
+            return;
+        }
+    };
+
+    if settings.api_key.is_empty() {
+        let _ = app_handle.emit(
+            EVENT_ERROR,
+            ErrorPayload {
+                session_id: session_id.to_string(),
+                message: "未设置 API Key，无法生成访谈大纲。请在设置中配置 API Key。".to_string(),
+                kind: "auth".to_string(),
+            },
+        );
+        let _ = scheduler_tx.try_send(SchedulerMsg::OutlineDone {
+            session_id: session_id.to_string(),
+        });
+        return;
+    }
+
+    if let Err(e) = store.set_session_outline_status(session_id, OutlineStatus::Generating) {
+        log::error!("[outline] set generating failed: {}", e);
+        let _ = scheduler_tx.try_send(SchedulerMsg::OutlineDone {
+            session_id: session_id.to_string(),
+        });
+        return;
+    }
+    emit_outline_updated(&*store, session_id, app_handle);
+
+    let session_id = session_id.to_string();
+    let app_handle = app_handle.clone();
+    tokio::spawn(async move {
+        let session = match store.get_session(&session_id) {
+            Ok(Some(s)) => s,
+            _ => {
+                log::error!("[outline] session not found: {}", session_id);
+                return;
+            }
+        };
+
+        let client = OpenAIClient::new(
+            settings.base_url,
+            settings.api_key,
+            settings.model_name,
+            settings.temperature,
+        );
+        let system_prompt = prompt::build_outline_system_prompt(&session.role);
+        let user_prompt = prompt::build_outline_user_prompt(&session);
+
+        match client.generate_summary(&system_prompt, &user_prompt).await {
+            Ok(text) => {
+                let parsed = prompt::parse_outline_response(&text);
+                if parsed.is_empty() {
+                    log::warn!("[outline] empty/parse-failed outline for session={}", session_id);
+                    let _ =
+                        store.set_session_outline_status(&session_id, OutlineStatus::None);
+                    let _ = app_handle.emit(
+                        EVENT_ERROR,
+                        ErrorPayload {
+                            session_id: session_id.clone(),
+                            message: "访谈大纲生成失败，可点击重试，或跳过直接开始访谈".to_string(),
+                            kind: "generation".to_string(),
+                        },
+                    );
+                    emit_outline_updated(&*store, &session_id, &app_handle);
+                    return;
+                }
+
+                // Normalize node ids: keep provided ones, assign n1..nN when
+                // missing or duplicated.
+                let mut seen = std::collections::HashSet::new();
+                let now = chrono::Utc::now().to_rfc3339();
+                let nodes: Vec<OutlineNode> = parsed
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| {
+                        let mut id = n
+                            .id
+                            .clone()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or_else(|| format!("n{}", i + 1));
+                        while !seen.insert(id.clone()) {
+                            id = format!("{}_{}", id, i + 1);
+                        }
+                        OutlineNode {
+                            id,
+                            session_id: session_id.clone(),
+                            title: n
+                                .title
+                                .clone()
+                                .filter(|t| !t.trim().is_empty())
+                                .unwrap_or_else(|| format!("主题 {}", i + 1)),
+                            description: n.description.clone(),
+                            status: OutlineNodeStatus::Pending,
+                            display_order: i as i32,
+                            created_at: now.clone(),
+                        }
+                    })
+                    .collect();
+
+                let result = store
+                    .replace_outline_nodes(&session_id, &nodes)
+                    .and_then(|_| {
+                        store.set_session_outline_status(&session_id, OutlineStatus::Draft)
+                    });
+                if let Err(e) = result {
+                    log::error!("[outline] save failed: {}", e);
+                    return;
+                }
+                log::info!(
+                    "[outline] session={}: draft outline with {} nodes",
+                    session_id,
+                    nodes.len()
+                );
+                emit_outline_updated(&*store, &session_id, &app_handle);
+            }
+            Err(e) => {
+                log::error!("[outline] generation failed: {}", e);
+                let _ = store.set_session_outline_status(&session_id, OutlineStatus::None);
+                let kind = match e {
+                    LlmError::Auth => "auth",
+                    LlmError::RateLimited => "rate_limit",
+                    _ => "generation",
+                };
+                let _ = app_handle.emit(
+                    EVENT_ERROR,
+                    ErrorPayload {
+                        session_id: session_id.clone(),
+                        message: format!("访谈大纲生成失败: {}（可重试或跳过直接开始）", e),
+                        kind: kind.to_string(),
+                    },
+                );
+                emit_outline_updated(&*store, &session_id, &app_handle);
+            }
+        }
+
+        let _ = scheduler_tx
+            .send(SchedulerMsg::OutlineDone {
+                session_id: session_id.clone(),
+            })
+            .await;
+    });
+}
+
+/// Save a user-edited outline: replace nodes, drop questions for closed nodes,
+/// reset saturation, then re-evaluate whether to generate or complete.
+fn handle_save_outline(
+    store: Arc<dyn Store>,
+    state: &mut SchedulerState,
+    session_id: &str,
+    mut nodes: Vec<OutlineNode>,
+    app_handle: &AppHandle,
+    tx: mpsc::Sender<SchedulerMsg>,
+) -> Result<(), String> {
+    // Normalize ordering + session binding
+    for (i, n) in nodes.iter_mut().enumerate() {
+        n.display_order = i as i32;
+        n.session_id = session_id.to_string();
+    }
+
+    // Closing a node drops its unanswered questions — they are now out of scope.
+    let closed: Vec<String> = nodes
+        .iter()
+        .filter(|n| n.status != OutlineNodeStatus::Pending)
+        .map(|n| n.id.clone())
+        .collect();
+
+    store
+        .replace_outline_nodes(session_id, &nodes)
+        .map_err(|e| e.to_string())?;
+    store
+        .skip_questions_for_nodes(session_id, &closed)
+        .map_err(|e| e.to_string())?;
+
+    // User steered the interview — allow generation again.
+    state.get_or_create(session_id).saturated = false;
+
+    refresh_outline_coverage(&*store, session_id, app_handle);
+    emit_outline_updated(&*store, session_id, app_handle);
+    check_water_levels_and_trigger(store, state, session_id, &[], app_handle, tx);
+    Ok(())
 }
