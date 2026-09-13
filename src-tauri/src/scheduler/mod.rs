@@ -3190,6 +3190,10 @@ fn spawn_outline_generation(
             }
             Err(e) => {
                 log::error!("[outline] generation failed: {}", e);
+                crate::agent::push_app_log(
+                    "outline",
+                    &format!("llm failed: {} — {}", session_id, e),
+                );
                 let _ = store.set_session_outline_status(&session_id, OutlineStatus::None);
                 let kind = match e {
                     LlmError::Auth => "auth",
