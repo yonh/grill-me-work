@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Layers,
   Loader2,
@@ -18,6 +18,7 @@ import {
   Network,
   Map as MapIcon,
   Activity as ActivityIcon,
+  Keyboard,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -69,6 +70,21 @@ export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
   const [reloadKey, setReloadKey] = useState(0);
   const [device, setDevice] = useState<DeviceId>("desktop");
   const [tab, setTab] = useState<PanelTab>("preview");
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+
+  // Interactive prototypes (games) need keyboard focus inside the iframe —
+  // keys typed in the outer app never reach it. Auto-focus on load and when
+  // the preview tab is shown.
+  const focusPreview = useCallback(() => {
+    iframeRef.current?.contentWindow?.focus();
+  }, []);
+  useEffect(() => {
+    if (tab === "preview" && previewUrl) {
+      // Defer so the iframe has painted before stealing focus.
+      const t = window.setTimeout(focusPreview, 50);
+      return () => window.clearTimeout(t);
+    }
+  }, [tab, previewUrl, reloadKey, focusPreview]);
 
   const refresh = useCallback(async () => {
     try {
@@ -390,7 +406,11 @@ export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
                   </ScrollArea>
                 </div>
               ) : hasFiles && previewUrl ? (
-                <div className="flex min-h-0 flex-1 items-stretch justify-center overflow-auto bg-muted/40 p-3">
+                <div className="relative flex min-h-0 flex-1 items-stretch justify-center overflow-auto bg-muted/40 p-3">
+                  <div className="pointer-events-none absolute left-1/2 top-4 z-10 flex -translate-x-1/2 items-center gap-1 rounded-full bg-background/80 px-2 py-0.5 text-[10px] text-muted-foreground shadow-sm">
+                    <Keyboard className="h-3 w-3" />
+                    可交互原型：点击画面后键盘操作
+                  </div>
                   <div
                     className={cn(
                       "h-full overflow-hidden rounded-lg border bg-white shadow-sm",
@@ -405,11 +425,13 @@ export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
                     }
                   >
                     <iframe
+                      ref={iframeRef}
                       key={`${reloadKey}-${device}`}
                       src={`${previewUrl}/?v=${reloadKey}&d=${device}`}
                       className="h-full w-full border-0 bg-white"
                       title="原型预览"
                       sandbox="allow-scripts allow-same-origin"
+                      onLoad={focusPreview}
                     />
                   </div>
                 </div>
