@@ -573,7 +573,10 @@ impl QuestionSource for OpenAIClient {
             };
 
             let http_client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
+                // Reasoning models can stream for 5+ min on big spec prompts;
+                // the total timeout must cover the whole generation, not just
+                // connect/first-byte.
+                .timeout(std::time::Duration::from_secs(600))
                 .build()?;
 
             let response = http_client
