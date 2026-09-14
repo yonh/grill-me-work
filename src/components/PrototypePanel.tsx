@@ -20,6 +20,7 @@ import {
   Map as MapIcon,
   Activity as ActivityIcon,
   Keyboard,
+  History,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -58,6 +59,8 @@ interface PrototypePanelProps {
 
 export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
   const isGenerating = useSessionStore((s) => s.isPrototypeGenerating);
+  const viewingArchive = useSessionStore((s) => s.viewingArchive);
+  const setViewingArchive = useSessionStore((s) => s.setViewingArchive);
   const { settings, saveSettings } = useSettings();
   const autoPaused = settings?.prototype_auto_paused ?? false;
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -126,6 +129,11 @@ export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
       window.removeEventListener("keyup", ku);
     };
   }, [tab, previewUrl]);
+
+  // Entering archive view → land on the question graph for immediate context.
+  useEffect(() => {
+    if (viewingArchive) setTab("qgraph");
+  }, [viewingArchive]);
 
   const refresh = useCallback(async () => {
     try {
@@ -365,6 +373,25 @@ export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
           )}
         </div>
       </div>
+
+      {/* Archived-round viewing banner */}
+      {viewingArchive && (
+        <div className="flex items-center gap-2 border-b bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+          <History className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">
+            正在查看第 {viewingArchive.round.number} 轮「{viewingArchive.round.title}」归档快照（只读）
+            ——问题图 / 分支地图已切换到该轮数据
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-5 shrink-0 px-1.5 text-[10px]"
+            onClick={() => setViewingArchive(null)}
+          >
+            返回当前
+          </Button>
+        </div>
+      )}
 
       {tab === "blueprint" ? (
         <div className="min-h-0 flex-1">

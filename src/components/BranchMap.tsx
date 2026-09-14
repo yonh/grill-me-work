@@ -56,7 +56,11 @@ function ancestorSet(tipSha: string | undefined, bySha: Map<string, TimelineComm
 
 /** Branch map: one lane per ticket, ticket card on top, its dev branches + commits below. */
 export function BranchMap() {
-  const { currentSessionId, pipelineStage, tickets } = useSessionStore();
+  const { currentSessionId, pipelineStage, tickets: liveTickets, viewingArchive } =
+    useSessionStore();
+  // Archive view → snapshot tickets, read-only.
+  const tickets = viewingArchive ? viewingArchive.tickets : liveTickets;
+  const readOnly = viewingArchive != null;
   const [commits, setCommits] = useState<TimelineCommit[]>([]);
   const [running, setRunning] = useState<Set<string>>(new Set());
   const [rounds, setRounds] = useState<Record<string, number>>({});
@@ -120,7 +124,7 @@ export function BranchMap() {
     return map;
   }, [tickets, commits, bySha, mainAncestors]);
 
-  if (pipelineStage !== "developing") {
+  if (!readOnly && pipelineStage !== "developing") {
     return (
       <div className="flex h-full items-center justify-center p-8 text-center text-sm text-muted-foreground">
         分支地图在确认 tickets 后开放——先完成访谈 → spec → tickets 流程。
@@ -187,7 +191,7 @@ export function BranchMap() {
                   </p>
                 )}
 
-                {t.status !== "rejected" && t.status !== "done" && (
+                {!readOnly && t.status !== "rejected" && t.status !== "done" && (
                   <div className="mt-2 space-y-1.5">
                     <Input
                       className="h-6 text-[11px]"
@@ -228,7 +232,7 @@ export function BranchMap() {
                     </div>
                   </div>
                 )}
-                {t.status === "in_progress" && (
+                {!readOnly && t.status === "in_progress" && (
                   <div className="mt-2 flex gap-1">
                     <Button
                       size="sm"

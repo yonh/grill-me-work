@@ -80,8 +80,12 @@ const nodeTypes = { qnode: QuestionNode };
 
 /** Layered DAG of interview questions; edges = depends_on. */
 export function QuestionGraph() {
-  const questions = useSessionStore((s) => s.questions);
-  const outlineNodes = useSessionStore((s) => s.outlineNodes);
+  const liveQuestions = useSessionStore((s) => s.questions);
+  const liveOutlineNodes = useSessionStore((s) => s.outlineNodes);
+  const archive = useSessionStore((s) => s.viewingArchive);
+  // Viewing an archived round → render its snapshot instead of live state.
+  const questions = archive ? archive.questions : liveQuestions;
+  const outlineNodes = archive ? archive.nodes : liveOutlineNodes;
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const nodeTitles = useMemo(

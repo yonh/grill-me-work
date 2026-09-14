@@ -40,7 +40,7 @@ const TICKET_STATUS_LABEL: Record<string, string> = {
 /** Staged pipeline: interview → spec → tickets → branch-map development,
  *  framed inside a development round (一轮开发循环) that can be archived. */
 export function PipelinePanel() {
-  const { pipelineStage, spec, tickets, currentSessionId, rounds, currentRound } =
+  const { pipelineStage, spec, tickets, currentSessionId, rounds, currentRound, viewingArchive, setViewingArchive } =
     useSessionStore();
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -271,13 +271,44 @@ export function PipelinePanel() {
                 {rounds
                   .filter((r) => r.status === "archived")
                   .map((r) => (
-                    <div key={r.id} className="rounded-md border p-2 text-xs">
+                    <div
+                      key={r.id}
+                      className={
+                        viewingArchive?.round.id === r.id
+                          ? "rounded-md border border-amber-500/60 bg-amber-500/5 p-2 text-xs"
+                          : "rounded-md border p-2 text-xs"
+                      }
+                    >
                       <div className="flex items-center gap-2">
                         <Badge variant="outline" className="text-[10px]">
                           第{r.number}轮
                         </Badge>
                         <span className="font-medium">{r.title}</span>
-                        <span className="ml-auto text-[10px] text-muted-foreground">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="ml-auto h-5 px-1.5 text-[10px]"
+                          disabled={busy}
+                          onClick={async () => {
+                            if (viewingArchive?.round.id === r.id) {
+                              setViewingArchive(null);
+                              return;
+                            }
+                            setBusy(true);
+                            try {
+                              setViewingArchive(await api.getRoundArchive(r.id));
+                            } catch (e) {
+                              toast.error(String(e));
+                            } finally {
+                              setBusy(false);
+                            }
+                          }}
+                        >
+                          {viewingArchive?.round.id === r.id
+                            ? "退出快照"
+                            : "查看快照"}
+                        </Button>
+                        <span className="text-[10px] text-muted-foreground">
                           {r.archived_at?.slice(0, 10)}
                         </span>
                       </div>

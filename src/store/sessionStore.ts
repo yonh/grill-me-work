@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Session, Question, Settings, OutlineNode, OutlineStatus, PipelineStage, Ticket, Round, Activity } from "@/lib/types";
+import type { Session, Question, Settings, OutlineNode, OutlineStatus, PipelineStage, Ticket, Round, RoundArchive, Activity } from "@/lib/types";
 
 interface SessionStore {
   sessions: Session[];
@@ -18,6 +18,8 @@ interface SessionStore {
   currentRound: Round | null;
   runningTickets: string[];
   activities: Activity[];
+  /** Non-null while the user is inspecting an archived round's snapshot. */
+  viewingArchive: RoundArchive | null;
 
   setSessions: (sessions: Session[]) => void;
   setCurrentSession: (id: string | null) => void;
@@ -42,6 +44,7 @@ interface SessionStore {
   setRounds: (rounds: Round[], currentRoundId?: string | null) => void;
   setActivities: (activities: Activity[]) => void;
   addActivity: (a: Activity) => void;
+  setViewingArchive: (archive: RoundArchive | null) => void;
   bumpSessionPrototypeVersion: (sessionId: string, version: number) => void;
 }
 
@@ -62,11 +65,12 @@ export const useSessionStore = create<SessionStore>((set) => ({
   currentRound: null,
   runningTickets: [],
   activities: [],
+  viewingArchive: null,
 
   setSessions: (sessions) => set({ sessions }),
 
   setCurrentSession: (id) =>
-    set({ currentSessionId: id, questions: [], outlineStatus: "none", outlineNodes: [], pipelineStage: "none", spec: null, tickets: [], rounds: [], currentRound: null, runningTickets: [], activities: [] }),
+    set({ currentSessionId: id, questions: [], outlineStatus: "none", outlineNodes: [], pipelineStage: "none", spec: null, tickets: [], rounds: [], currentRound: null, runningTickets: [], activities: [], viewingArchive: null }),
 
   addSession: (session) =>
     set((state) => ({ sessions: [session, ...state.sessions] })),
@@ -133,6 +137,8 @@ export const useSessionStore = create<SessionStore>((set) => ({
     }),
 
   setActivities: (activities) => set({ activities }),
+
+  setViewingArchive: (viewingArchive) => set({ viewingArchive }),
 
   addActivity: (a) =>
     set((state) =>
