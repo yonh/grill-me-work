@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Layers,
   Loader2,
@@ -85,6 +86,46 @@ export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
       return () => window.clearTimeout(t);
     }
   }, [tab, previewUrl, reloadKey, focusPreview]);
+
+  // Forward keys into the cross-origin preview iframe: the served HTML
+  // carries a __grillKey relay that re-dispatches them as KeyboardEvents.
+  // This works even when the webview refuses to give the iframe real focus.
+  useEffect(() => {
+    if (tab !== "preview" || !previewUrl) return;
+    const forward = (kind: "keydown" | "keyup") => (e: KeyboardEvent) => {
+      const el = document.activeElement as HTMLElement | null;
+      if (
+        el &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.isContentEditable)
+      ) {
+        return;
+      }
+      iframeRef.current?.contentWindow?.postMessage(
+        {
+          __grillKey: true,
+          kind,
+          init: {
+            key: e.key,
+            code: e.code,
+            repeat: e.repeat,
+            bubbles: true,
+            cancelable: true,
+          },
+        },
+        "*"
+      );
+    };
+    const kd = forward("keydown");
+    const ku = forward("keyup");
+    window.addEventListener("keydown", kd);
+    window.addEventListener("keyup", ku);
+    return () => {
+      window.removeEventListener("keydown", kd);
+      window.removeEventListener("keyup", ku);
+    };
+  }, [tab, previewUrl]);
 
   const refresh = useCallback(async () => {
     try {
@@ -303,8 +344,8 @@ export function PrototypePanel({ sessionId, version }: PrototypePanelProps) {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => window.open(previewUrl, "_blank")}
-                  title="新窗口打开"
+                  onClick={() => openUrl(previewUrl).catch(console.error)}
+                  title="在系统浏览器中打开"
                 >
                   <ExternalLink className="h-3.5 w-3.5" />
                 </Button>

@@ -264,6 +264,27 @@ fn preview_state() -> &'static Mutex<Option<PreviewState>> {
     PREVIEW.get_or_init(|| Mutex::new(None))
 }
 
+/// Inject a postMessage→KeyboardEvent relay into served HTML.
+/// The preview iframe is cross-origin to the app shell, so keys typed in the
+/// app never reach the game. The shell posts `{__grillKey:…}` messages; this
+/// listener re-dispatches them as real KeyboardEvents on the page's window.
+/// Harmless when the page is opened directly in a browser (no one posts).
+fn inject_key_relay(bytes: Vec<u8>) -> Vec<u8> {
+    const SNIPPET: &str = "<script>window.addEventListener('message',function(e){var d=e.data;if(d&&d.__grillKey){window.dispatchEvent(new KeyboardEvent(d.kind,d.init));}});</script>";
+    let Ok(mut html) = String::from_utf8(bytes) else {
+        return Vec::new();
+    };
+    if html.contains("__grillKey") {
+        return html.into_bytes();
+    }
+    if let Some(pos) = html.rfind("</body>") {
+        html.insert_str(pos, SNIPPET);
+    } else {
+        html.push_str(SNIPPET);
+    }
+    html.into_bytes()
+}
+
 fn content_type(path: &Path) -> &'static str {
     match path
         .extension()
@@ -331,6 +352,11 @@ pub fn ensure_preview_server(session_id: &str) -> std::io::Result<String> {
             match std::fs::read(&file_path) {
                 Ok(bytes) => {
                     let ct = content_type(&file_path);
+                    let bytes = if ct == "text/html; charset=utf-8" {
+                        inject_key_relay(bytes)
+                    } else {
+                        bytes
+                    };
                     let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], ct.as_bytes())
                         .unwrap();
                     let resp = tiny_http::Response::from_data(bytes).with_header(header);
@@ -340,6 +366,7 @@ pub fn ensure_preview_server(session_id: &str) -> std::io::Result<String> {
                     // SPA-ish fallback to index.html for missing pages
                     let index = root_for_thread.join("index.html");
                     if let Ok(bytes) = std::fs::read(&index) {
+                        let bytes = inject_key_relay(bytes);
                         let header =
                             tiny_http::Header::from_bytes(&b"Content-Type"[..], b"text/html; charset=utf-8")
                                 .unwrap();
