@@ -1,4 +1,5 @@
 # Logs
+.playwright-cli/
 logs
 *.log
 npm-debug.log*
