@@ -81,6 +81,12 @@ fn is_repo(dir: &Path) -> bool {
 }
 
 /// Ensure a local git repo exists in `dir` and has at least one commit if there are files.
+/// Paths that must never be tracked in the workspace decision tree:
+/// - `archives/` — round snapshots; if tracked, `git checkout` to a branch
+///   that predates them silently deletes them from the working tree
+/// - `.playwright-cli/` — agent test artifacts (page yml/png noise)
+const IGNORED_PATHS: &[&str] = &["archives/", ".playwright-cli/"];
+
 pub fn ensure_repo(dir: &Path) -> Result<(), String> {
     if !git_available() {
         return Err("系统未安装 git".into());
@@ -91,6 +97,28 @@ pub fn ensure_repo(dir: &Path) -> Result<(), String> {
         let _ = run_git(dir, &["config", "user.name", "Grill-Me"]);
         let _ = run_git(dir, &["config", "user.email", "grill-me@local"]);
         let _ = run_git(dir, &["config", "commit.gpgsign", "false"]);
+    }
+    // Maintain .gitignore and untrack anything already committed — gitignore
+    // alone does not stop tracked files from being deleted on checkout.
+    let gi = dir.join(".gitignore");
+    let mut body = std::fs::read_to_string(&gi).unwrap_or_default();
+    let mut changed = false;
+    for pat in IGNORED_PATHS {
+        if !body.lines().any(|l| l.trim() == *pat) {
+            if !body.is_empty() && !body.ends_with('\n') {
+                body.push('\n');
+            }
+            body.push_str(pat);
+            body.push('\n');
+            changed = true;
+        }
+        let _ = run_git(
+            dir,
+            &["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", pat.trim_end_matches('/')],
+        );
+    }
+    if changed {
+        let _ = std::fs::write(&gi, body);
     }
     Ok(())
 }
